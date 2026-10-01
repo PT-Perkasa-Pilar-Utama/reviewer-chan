@@ -2,7 +2,8 @@ name: reviewer-chan review
 
 # The shared Reviewer-chan job. Each repo calls it from a short file pinned to a tagged commit
 # (see the README); Dependabot proposes each new tag there. A comment whose first line is
-# "/reviewer-chan review" starts it, from the PR author with write access or a tech lead.
+# "/reviewer-chan" (or "/reviewer-chan review") starts it, from the PR author with write access
+# or a tech lead.
 #
 # Threat model: the job holds the repo tech lead's Claude token (or an OpenCode key) and the app's
 # private key, and the model reads untrusted text (the diff, the PR body, comments). So the model
@@ -68,9 +69,9 @@ env:
 
 jobs:
   # Only inside this org, only on a pull request, never for a bot's comment. The step decides the
-  # rest: the comment's first line must be exactly "/reviewer-chan review" (any case), so quoting
-  # it in a reply does not start a review; and the commenter must be a tech lead, a repo admin, or
-  # the PR's author with write access. On an outsider's PR only a tech lead or an admin can start
+  # rest: the comment's first line must be exactly "/reviewer-chan" or "/reviewer-chan review" (any
+  # case), so quoting it in a reply does not start a review; and the commenter must be a tech lead,
+  # a repo admin, or the PR's author with write access. On an outsider's PR only a tech lead or an admin can start
   # it, and that comment is the approval.
   gate:
     if: >-
@@ -98,7 +99,10 @@ jobs:
           lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
           stop() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
           first=$(printf '%s\n' "$BODY" | head -n 1 | tr -d '\r' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')
-          [ "$(lower "$first")" = "/reviewer-chan review" ] || stop "Not a trigger: the first line is not \"/reviewer-chan review\"."
+          case "$(lower "$first")" in
+            ("/reviewer-chan" | "/reviewer-chan review") ;;
+            (*) stop "Not a trigger: the first line is not \"/reviewer-chan\" or \"/reviewer-chan review\"." ;;
+          esac
           view=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json state,author,headRefOid,baseRefOid)
           [ "$(jq -r .state <<< "$view")" = "OPEN" ] || stop "PR #$PR is not open."
           author=$(jq -r .author.login <<< "$view")

@@ -1,7 +1,7 @@
 # Reviewer-chan
 
 The shared job behind Reviewer-chan, PT Perkasa Pilar Utama's review bot.
-Comment `/reviewer-chan review` on a pull request, and the
+Comment `/reviewer-chan` on a pull request, and the
 Reviewer-chan app posts a tech-lead review made by the `lead-review` skill from
 [snowfluke/tech-lead-skills](https://github.com/snowfluke/tech-lead-skills).
 
@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   review:
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.1.0
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.2.0
     with:
       daily_cap: 10
       tech_leads: your-login # logins separated by spaces or commas
@@ -42,7 +42,7 @@ jobs:
     secrets: inherit
 ```
 
-A comment whose first line is `/reviewer-chan review` starts a review. Case and
+A comment whose first line is `/reviewer-chan` or `/reviewer-chan review` starts a review. Case and
 extra spaces do not matter. The PR author with write access, a tech lead in
 `tech_leads`, or a repo admin may comment it. Keep the file name
 `reviewer-chan.yml`: the daily cap counts runs of it.
