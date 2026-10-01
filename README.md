@@ -29,10 +29,13 @@ permissions:
 
 jobs:
   review:
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v1.3.0
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v1.3.1
     with:
       daily_cap: 10
       also_on_reviewer: your-login # optional: a review request to you also starts Reviewer-chan
+    # A called workflow sees a secret only when it is passed or inherited; the job's
+    # reviewer-chan environment then supplies the value.
+    secrets: inherit
 ```
 
 The calling repo needs an environment named `reviewer-chan`, limited to the

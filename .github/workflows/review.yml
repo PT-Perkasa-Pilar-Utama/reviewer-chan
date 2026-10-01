@@ -167,13 +167,13 @@ jobs:
             --body "Reviewer-chan has used today's $DAILY_CAP reviews for this repo. Request again tomorrow (UTC), or ask the tech lead."
           exit 1
 
-      # The base commit, not the PR, in a subfolder: the workspace root is then no git repo, so
-      # the Claude action has nowhere to write its token. No stored credential either.
+      # The base commit, not the PR, at the workspace root: the Claude action needs a git repo
+      # there. It writes its read-only token into .git/config, so Claude's tools and the skill's
+      # scripts both refuse .git paths. No stored credential from checkout.
       - name: Check out the base commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          path: base
           persist-credentials: false
 
       # Root-owned and read-only, so Claude cannot replace a script it is allowed to run. The
@@ -206,7 +206,6 @@ jobs:
           refuse() { echo "$1" > "$RUNNER_TEMP/refusal"; echo "::error::$1"; exit 1; }
           moved="the pull request changed after the request, so its review would not match what was requested; request it again"
           mkdir -p "$IN" "$OUT"
-          cd base
           # Auth for this one fetch only, never written to a config Claude could read.
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git -c "http.extraheader=$auth" fetch --no-tags --depth=1 origin "pull/$PR/head:reviewer-chan-head"
@@ -303,7 +302,7 @@ jobs:
             --max-turns 150
             --add-dir /tmp/review /opt/lead-review
             --allowedTools 'Read(./**),Read(//tmp/review/**),Read(//opt/lead-review/**),Grep(./**),Grep(//tmp/review/**),Grep(//opt/lead-review/**),Glob(./**),Glob(//tmp/review/**),Glob(//opt/lead-review/**),Task,Write(//tmp/review/out/**),Edit(//tmp/review/out/**),Bash(python3 /opt/lead-review/scripts/review_body.py *),Bash(python3 /opt/lead-review/scripts/check_ac_refs.py *)'
-            --disallowedTools 'Bash(*$*),Bash(*`*),Bash(*>*),Bash(*<*),Bash(*|*),Bash(*;*),Bash(*&*),Read(./**/.git/**),Grep(./**/.git/**),Glob(./**/.git/**),Read(//tmp/review/head/.git),Read(//proc/**),Read(//sys/**),Read(//home/runner/.claude/**),Read(//home/runner/work/_temp/**),Read(//etc/**),Read(//root/**)'
+            --disallowedTools 'Bash(*$*),Bash(*`*),Bash(*>*),Bash(*<*),Bash(*|*),Bash(*;*),Bash(*&*),Read(./.git/**),Grep(./.git/**),Glob(./.git/**),Read(./**/.git/**),Grep(./**/.git/**),Glob(./**/.git/**),Read(//tmp/review/head/.git),Read(//proc/**),Read(//sys/**),Read(//home/runner/.claude/**),Read(//home/runner/work/_temp/**),Read(//etc/**),Read(//root/**)'
 
       # A new session with no tools judges the body. The reviewing session has ended and never
       # sees this answer, so it cannot write or tune it.
