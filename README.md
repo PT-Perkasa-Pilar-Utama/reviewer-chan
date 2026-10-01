@@ -50,8 +50,19 @@ Dependabot in each calling repo picks up the tag.
 
 ## Safety
 
-The job never runs the pull request's code. It checks out the base commit,
-reads the PR's files as text, takes the gate from the required CI checks, and
-lets Claude run only the read-only commands in its `--allowedTools`. `main`
-takes changes only through a reviewed pull request, and each calling repo pins
-a tagged commit.
+Claude reads; the workflow writes.
+
+| Step | Runs Claude | Holds |
+| --- | --- | --- |
+| Prepare: fetch the PR head, write the diff, the PR data, the checks and the members' comments | No | A read-only GitHub token |
+| Review | Yes | The Claude token. No git, no gh, no GitHub write token. It reads the review folders, writes only to `/tmp/review/out`, and runs only the skill's two scripts, installed read-only. Pipes, redirects and command substitution are denied. |
+| Post: check the body, scan it for credentials, post it | No | The app token, minted after Claude finished |
+
+- The job never runs the pull request's code. The gate comes from the required CI checks, which run without secrets.
+- It runs only inside PT-Perkasa-Pilar-Utama, never for a fork's PR or a bot's PR.
+- Comments reach Claude only from owners, members and collaborators. On a public repo, anyone else's comment is dropped.
+- The skill's scripts refuse files outside the review folders, by real path, so `..` and symlinks cannot reach secrets.
+- The app's private key reaches only the two steps that mint a token, and neither runs Claude.
+- `main` takes changes only through a reviewed pull request, and each calling repo pins a tagged commit.
+
+What this does not cover: a crafted pull request can still try to steer the review itself, for example toward approving bad code. The human approval that branch protection requires is the guard against that. Never remove it because a bot reviews.
