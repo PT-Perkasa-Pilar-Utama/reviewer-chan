@@ -44,7 +44,7 @@ ecosystem) then proposes each new tag as a pull request, so a change here reache
 your repo only after someone reviews it.
 
 Org members: the full setup guide, with the admin steps, is in
-PT-Perkasa-Pilar-Utama/review-chan-setup.
+PT-Perkasa-Pilar-Utama/reviewer-chan-setup.
 
 ## Release
 

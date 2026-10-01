@@ -94,7 +94,7 @@ jobs:
         run: |
           rules=$(gh api "repos/$GITHUB_REPOSITORY/environments/reviewer-chan-outside" --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length')
           if [ "${rules:-0}" -lt 1 ]; then
-            echo "::error::The reviewer-chan-outside environment has no required reviewers, so outside pull requests would run unapproved. See docs/04-admin.md in review-chan-setup."
+            echo "::error::The reviewer-chan-outside environment has no required reviewers, so outside pull requests would run unapproved. See docs/04-admin.md in reviewer-chan-setup."
             exit 1
           fi
 
@@ -120,15 +120,15 @@ jobs:
         run: |
           limited=$(gh api "repos/$GITHUB_REPOSITORY/environments/reviewer-chan" --jq '.deployment_branch_policy != null')
           if [ "$limited" != "true" ]; then
-            echo "::error::The reviewer-chan environment is open to every branch. Limit it to main. See docs/04-admin.md in review-chan-setup."
+            echo "::error::The reviewer-chan environment is open to every branch. Limit it to main. See docs/04-admin.md in reviewer-chan-setup."
             exit 1
           fi
           if [ -z "$TOKEN" ]; then
-            echo "::error::CLAUDE_CODE_OAUTH_TOKEN is not a secret of the reviewer-chan environment. See docs/03-token.md in review-chan-setup."
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN is not a secret of the reviewer-chan environment. See docs/03-token.md in reviewer-chan-setup."
             exit 1
           fi
           if [ -z "$KEY" ]; then
-            echo "::error::REVIEWER_CHAN_PRIVATE_KEY is not a secret of the reviewer-chan environment. See docs/04-admin.md in review-chan-setup."
+            echo "::error::REVIEWER_CHAN_PRIVATE_KEY is not a secret of the reviewer-chan environment. See docs/04-admin.md in reviewer-chan-setup."
             exit 1
           fi
 
