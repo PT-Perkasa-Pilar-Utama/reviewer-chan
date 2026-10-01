@@ -59,7 +59,8 @@ Claude reads; the workflow writes.
 | Post: check the body, scan it for credentials, post it | No | The app token, minted after Claude finished |
 
 - The job never runs the pull request's code. The gate comes from the required CI checks, which run without secrets.
-- It runs only inside PT-Perkasa-Pilar-Utama, never for a fork's PR or a bot's PR.
+- It runs only inside PT-Perkasa-Pilar-Utama, and never for a bot's PR.
+- A PR from a fork, or by an author who is not an owner, member or collaborator, waits for a maintainer's approval in the `reviewer-chan-outside` environment before it uses any secret or Claude usage. The job refuses if that environment has no required reviewers.
 - Comments reach Claude only from owners, members and collaborators. On a public repo, anyone else's comment is dropped.
 - The skill's scripts refuse files outside the review folders, by real path, so `..` and symlinks cannot reach secrets.
 - The app's private key reaches only the two steps that mint a token, and neither runs Claude.

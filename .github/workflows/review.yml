@@ -34,7 +34,7 @@ on:
 
 env:
   # The lead-review version every repo trusts. Bump it on purpose, after reading the change.
-  LEAD_REVIEW_REF: e3983f5164dfd3c54bd442353c5a5ecf11a7aeb1
+  LEAD_REVIEW_REF: 856cdf5fb7c094ac91aaef5d4795ea4c0615f0d6
   DAILY_CAP: ${{ inputs.daily_cap }}
   PR: ${{ github.event.pull_request.number }}
   IN: /tmp/review/in
@@ -43,15 +43,52 @@ env:
   SKILL: /opt/lead-review
 
 jobs:
-  review:
-    # Only inside this org, only when the reviewer-chan team is the one requested, never for a
-    # fork (whose PR must not reach a job with secrets), and never for a bot's PR, whose body
-    # carries text from outside the org.
+  # Only inside this org, only when the reviewer-chan team is the one requested, and never for a
+  # bot's PR, whose body carries text from outside the org. A PR from a fork, or by an author
+  # with no role in the repo, is outside: it waits for a maintainer's approval before any
+  # secret or Claude usage is spent on it.
+  gate:
     if: >-
       github.repository_owner == 'PT-Perkasa-Pilar-Utama' &&
       github.event.requested_team.slug == 'reviewer-chan' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      outside: ${{ steps.who.outputs.outside }}
+    steps:
+      - id: who
+        env:
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          ROLE: ${{ github.event.pull_request.author_association }}
+        run: |
+          case "$ROLE" in OWNER|MEMBER|COLLABORATOR) member=true ;; *) member=false ;; esac
+          if [ "$FORK" = "true" ] || [ "$member" = "false" ]; then echo "outside=true" >> "$GITHUB_OUTPUT"; else echo "outside=false" >> "$GITHUB_OUTPUT"; fi
+
+  # The environment's required reviewers pause this job until a maintainer approves. GitHub
+  # creates a missing environment with no rules, which would approve itself, so the job also
+  # checks that the rule exists and refuses otherwise.
+  approve:
+    needs: gate
+    if: needs.gate.outputs.outside == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: reviewer-chan-outside
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rules=$(gh api "repos/$GITHUB_REPOSITORY/environments/reviewer-chan-outside" --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length')
+          if [ "${rules:-0}" -lt 1 ]; then
+            echo "::error::The reviewer-chan-outside environment has no required reviewers, so outside pull requests would run unapproved. See docs/04-admin.md in review-chan-setup."
+            exit 1
+          fi
+
+  review:
+    needs: [gate, approve]
+    if: >-
+      always() && needs.gate.result == 'success' &&
+      (needs.approve.result == 'success' || needs.approve.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 50
     concurrency:
@@ -79,7 +116,8 @@ jobs:
           CALLER: ${{ inputs.caller_workflow }}
         run: |
           used=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$CALLER" --created ">=$(date -u +%F)" \
-            --limit 100 --json databaseId --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID)] | length")
+            --limit 100 --json databaseId,conclusion \
+            --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID and .conclusion != \"skipped\")] | length")
           echo "over=$([ "$used" -ge "$DAILY_CAP" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: App token for the cap notice
@@ -176,7 +214,7 @@ jobs:
           # two scripts. Denied: shell syntax that could chain, redirect or substitute commands.
           claude_args: |
             --add-dir /tmp/review /opt/lead-review
-            --allowedTools 'Read(./**),Read(//tmp/review/**),Read(//opt/lead-review/**),Glob,Grep,Task,Write(//tmp/review/out/**),Edit(//tmp/review/out/**),Bash(python3 /opt/lead-review/scripts/review_body.py *),Bash(python3 /opt/lead-review/scripts/check_ac_refs.py *)'
+            --allowedTools 'Read(./**),Read(//tmp/review/**),Read(//opt/lead-review/**),Grep(./**),Grep(//tmp/review/**),Grep(//opt/lead-review/**),Glob(./**),Glob(//tmp/review/**),Glob(//opt/lead-review/**),Task,Write(//tmp/review/out/**),Edit(//tmp/review/out/**),Bash(python3 /opt/lead-review/scripts/review_body.py *),Bash(python3 /opt/lead-review/scripts/check_ac_refs.py *)'
             --disallowedTools 'Bash(*$(*),Bash(*`*),Bash(*>*),Bash(*<*),Bash(*|*),Bash(*;*),Bash(*&*),Read(//proc/**),Read(//sys/**),Read(//home/runner/.claude/**),Read(//home/runner/work/_temp/**),Read(//etc/**),Read(//root/**)'
 
       - name: App token for posting
