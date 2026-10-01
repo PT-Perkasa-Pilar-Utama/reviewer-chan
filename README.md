@@ -28,7 +28,7 @@ permissions:
 
 jobs:
   review:
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@main
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@3a8ccc595456afa9638b65dfe781d8ad49e4d29f # v1.0.0
     with:
       daily_cap: 10
     secrets:
@@ -36,13 +36,22 @@ jobs:
       reviewer_chan_key: ${{ secrets.REVIEWER_CHAN_PRIVATE_KEY }}
 ```
 
+Pin the job by commit, as above. Your repo's Dependabot (the `github-actions`
+ecosystem) then proposes each new tag as a pull request, so a change here reaches
+your repo only after someone reviews it.
+
 Org members: the full setup guide, with the admin steps, is in
 PT-Perkasa-Pilar-Utama/review-chan-setup.
+
+## Release
+
+Merge the change to `main` through a pull request, then tag it: `vMAJOR.MINOR.PATCH`.
+Dependabot in each calling repo picks up the tag.
 
 ## Safety
 
 The job never runs the pull request's code. It checks out the base commit,
 reads the PR's files as text, takes the gate from the required CI checks, and
-lets Claude run only the read-only commands in its `--allowedTools`. A change
-to `main` here reaches every calling repo, so `main` takes changes only through
-a reviewed pull request.
+lets Claude run only the read-only commands in its `--allowedTools`. `main`
+takes changes only through a reviewed pull request, and each calling repo pins
+a tagged commit.
