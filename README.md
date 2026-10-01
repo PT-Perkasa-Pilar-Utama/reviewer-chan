@@ -1,7 +1,7 @@
 # Reviewer-chan
 
 The shared job behind Reviewer-chan, PT Perkasa Pilar Utama's review bot.
-Comment `@reviewer-chan review` on a pull request, and the
+Comment `/reviewer-chan review` on a pull request, and the
 Reviewer-chan app posts a tech-lead review made by the `lead-review` skill from
 [snowfluke/tech-lead-skills](https://github.com/snowfluke/tech-lead-skills).
 
@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   review:
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.0.0
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.1.0
     with:
       daily_cap: 10
       tech_leads: your-login # logins separated by spaces or commas
@@ -42,7 +42,7 @@ jobs:
     secrets: inherit
 ```
 
-A comment whose first line is `@reviewer-chan review` starts a review. Case and
+A comment whose first line is `/reviewer-chan review` starts a review. Case and
 extra spaces do not matter. The PR author with write access, a tech lead in
 `tech_leads`, or a repo admin may comment it. Keep the file name
 `reviewer-chan.yml`: the daily cap counts runs of it.
@@ -80,7 +80,7 @@ The engine (Claude or OpenCode) reads; the workflow writes.
 - It runs only inside PT-Perkasa-Pilar-Utama, and never for a bot's comment. On a bot's or an outsider's PR, only a tech lead or a repo admin can start it.
 - Only the PR author with write access, a tech lead in `tech_leads`, or a repo admin can start a review. Anyone else's comment is ignored, and the run summary says why. On a PR by an outsider (a fork, or an author without write access), only a tech lead or an admin can start it, and that comment is the approval. The gate resolves the head commit when the comment arrives, and the run summary names it. If the PR changes before the review starts, nothing is posted.
 - The caller's trigger is `issue_comment` (type `created`), which runs the calling file from the default branch, so a PR cannot change it.
-- Every comment that starts with `@reviewer-chan` starts a run of the calling workflow, and the gate stops the ones that do not match. The daily cap counts only runs whose review job ran.
+- Every comment that starts with `/reviewer-chan` starts a run of the calling workflow, and the gate stops the ones that do not match. The daily cap counts only runs whose review job ran.
 - OpenCode: the job downloads OpenCode's release file and checks it against a pinned SHA-256 digest. Its config comes only from the job, so the repo's own OpenCode config, plugins and `.claude` files are ignored. It has no web tools. It has no env scrub like Claude's.
 - Comments reach the engine only from people with write access.
 - The rules come from the base branch. The workflow picks the checklist, not Claude.
