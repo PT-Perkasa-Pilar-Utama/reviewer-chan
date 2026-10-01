@@ -27,6 +27,10 @@ on:
         description: The calling workflow's file name, for counting today's reviews.
         type: string
         default: reviewer-chan.yml
+      also_on_reviewer:
+        description: A GitHub login, usually the tech lead's. A review request to this person also starts Reviewer-chan.
+        type: string
+        default: ""
 
 env:
   # The lead-review version every repo trusts. Bump it on purpose, after reading the change.
@@ -42,14 +46,15 @@ env:
   SKILL: /opt/lead-review
 
 jobs:
-  # Only inside this org, only when the reviewer-chan team is the one requested, and never for a
-  # bot's PR, whose body carries text from outside the org. A PR from a fork, or by an author
+  # Only inside this org, only when the reviewer-chan team (or the also_on_reviewer person) is the
+  # one requested, and never for a bot's PR, whose body carries text from outside the org. A PR from a fork, or by an author
   # without write access, is outside: it waits for a maintainer's approval before any secret or
   # Claude usage is spent on it.
   gate:
     if: >-
       github.repository_owner == 'PT-Perkasa-Pilar-Utama' &&
-      github.event.requested_team.slug == 'reviewer-chan' &&
+      (github.event.requested_team.slug == 'reviewer-chan' ||
+       (inputs.also_on_reviewer != '' && github.event.requested_reviewer.login == inputs.also_on_reviewer)) &&
       github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -140,7 +145,7 @@ jobs:
         run: |
           used=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$CALLER" --created ">=$(date -u +%F)" \
             --limit 100 --json databaseId,conclusion \
-            --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID and .conclusion != \"skipped\")] | length")
+            --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID and .conclusion != \"skipped\" and .conclusion != \"cancelled\")] | length")
           echo "over=$([ "$used" -ge "$DAILY_CAP" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: App token for the cap notice

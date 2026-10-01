@@ -29,9 +29,10 @@ permissions:
 
 jobs:
   review:
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v1.2.0
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v1.3.0
     with:
       daily_cap: 10
+      also_on_reviewer: your-login # optional: a review request to you also starts Reviewer-chan
 ```
 
 The calling repo needs an environment named `reviewer-chan`, limited to the
