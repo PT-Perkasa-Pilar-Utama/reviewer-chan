@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   review:
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v1.3.1
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v1.4.0
     with:
       daily_cap: 10
       also_on_reviewer: your-login # optional: a review request to you also starts Reviewer-chan
@@ -62,9 +62,9 @@ Claude reads; the workflow writes.
 | Step | Runs Claude | Holds |
 | --- | --- | --- |
 | Prepare: fetch the PR head, write the diff, the PR data, the checks, the comments by writers, and the skeletons | No | A read-only GitHub token |
-| Review | Yes | The Claude token. No git, no gh, no GitHub write token. It reads the review folders, writes only to `/tmp/review/out`, and runs only the skill's two scripts, installed read-only. Shell syntax that chains, redirects, expands or substitutes is denied. Its shell commands run with no credentials in their environment. |
-| Verify | Yes, with no tools, in a new session | The Claude token. The reviewing session never sees its answer. |
-| Post: check the body, scan it, post it | No | The app token, minted after Claude finished |
+| Review | Yes | The Claude token, and no GitHub token at all. It reads the review folders, writes only to `/tmp/review/out`, and runs only the skill's two scripts, installed read-only. Shell syntax that chains, redirects, expands or substitutes is denied. Its shell commands run with no credentials in their environment. |
+| Verify and gate | The verifier: yes, with no tools, in a new session | The Claude token. The gates (format, verifier, CI line, scans, no finding dropped) run without Claude. A body fault goes back to the reviewing session to fix, at most twice. Claude never writes a verdict. |
+| Post | No | The app token, minted after Claude finished |
 
 - Both secrets live in the calling repo's `reviewer-chan` environment, which only `main` can use. A workflow on any other branch cannot read them.
 - The job never runs the pull request's code. The gate comes from the required CI checks, which run without secrets.
@@ -73,7 +73,8 @@ Claude reads; the workflow writes.
 - Comments reach Claude only from people with write access.
 - The rules come from the base branch. The workflow picks the checklist, not Claude.
 - The skill's scripts refuse files outside the review folders and inside any `.git` folder, by real path.
-- The review posts as a comment or a request for changes. It never approves.
+- The review posts as a comment or a request for changes. It never approves. A round with nothing open dismisses Reviewer-chan's earlier requests for changes, so it does not keep the PR blocked.
+- Every run uploads its drafts, verdicts and gate results as an artifact for 7 days. A file holding a credential-shaped or long encoded string is withheld from it.
 - The posted body has no images, raw HTML, mentions, or links other than the repo's own files at a pinned commit. A failed check posts a fixed sentence, never text from the PR or from Claude.
 - `main` takes changes only through a reviewed pull request, and each calling repo pins a tagged commit.
 
