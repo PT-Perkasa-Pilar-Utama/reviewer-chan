@@ -195,6 +195,21 @@ jobs:
           gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null \
             || echo "::warning::Could not react to the comment."
 
+      # One status comment per request. Later steps edit it to the outcome: the review's link, the
+      # reason nothing was posted, or that a newer request replaced this one.
+      - name: Post the status comment
+        id: status
+        env:
+          GH_TOKEN: ${{ steps.notice_token.outputs.token }}
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if ! id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --jq .id \
+              -f body="Reviewer-chan is reviewing \`${HEAD_SHA:0:7}\`. It waits for the required checks first, so a review takes about 10 to 30 minutes. Run: $run_url"); then
+            echo "::warning::Could not post the status comment."
+            id=""
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
       # Every comment that starts with /reviewer-chan starts a run of the calling workflow, and the
       # gate skips most. A review counts only when its review job ran.
       - name: Count today's reviews
@@ -217,9 +232,14 @@ jobs:
         if: steps.cap.outputs.over == 'true'
         env:
           GH_TOKEN: ${{ steps.notice_token.outputs.token }}
+          STATUS_ID: ${{ steps.status.outputs.id }}
         run: |
-          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" \
-            --body "Reviewer-chan has used today's $DAILY_CAP reviews for this repo. Ask again tomorrow (UTC), or ask the tech lead."
+          # Edit the status comment, or post a new comment when there is none.
+          say() {
+            if [ -n "$STATUS_ID" ] && gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" -f body="$1" > /dev/null; then return; fi
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$1"
+          }
+          say "Reviewer-chan has used today's $DAILY_CAP reviews for this repo. Ask again tomorrow (UTC), or ask the tech lead."
           exit 1
 
       # The base commit, not the PR. No stored credential: the checkout is readable by Claude.
@@ -659,11 +679,18 @@ jobs:
       # The body passed every gate in the step above, and nothing has run since. It posts as a
       # comment or a request for changes: only a person approves.
       - name: Post
+        id: post
         if: steps.loop.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ steps.post_token.outputs.token }}
+          STATUS_ID: ${{ steps.status.outputs.id }}
         run: |
           refuse() { echo "$1" > "$RUNNER_TEMP/refusal"; echo "::error::$1"; exit 1; }
+          # Edit the status comment, or post a new comment when there is none.
+          say() {
+            if [ -n "$STATUS_ID" ] && gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" -f body="$1" > /dev/null; then return; fi
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$1"
+          }
           body="$OUT/review.md"
           case "$(head -n 1 "$body")" in
             ("## Round "*" | Approve") verdict=--comment ;;
@@ -681,6 +708,10 @@ jobs:
             done
           fi
           gh pr review "$PR" -R "$GITHUB_REPOSITORY" "$verdict" --body-file "$body"
+          url=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+            | jq -s -r '[(add // [])[] | select(.user.login == "reviewer-chan[bot]")] | last | .html_url // empty')
+          say "Reviewer-chan posted its review of \`${HEAD_SHA:0:7}\`: ${url:-see the reviews below}" \
+            || echo "::warning::Could not update the status comment."
 
       # Once the comment has its reaction, every failure gets an answer: the posting token if it
       # was minted, else the notice token (both are app tokens with the same permissions).
@@ -688,7 +719,35 @@ jobs:
         if: failure() && steps.notice_token.outputs.token != '' && steps.cap.outputs.over != 'true'
         env:
           GH_TOKEN: ${{ steps.post_token.outputs.token || steps.notice_token.outputs.token }}
+          STATUS_ID: ${{ steps.status.outputs.id }}
         run: |
+          # Edit the status comment, or post a new comment when there is none.
+          say() {
+            if [ -n "$STATUS_ID" ] && gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" -f body="$1" > /dev/null; then return; fi
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$1"
+          }
           reason="it stopped on an error"
           if [ -s "$RUNNER_TEMP/refusal" ]; then reason=$(cat "$RUNNER_TEMP/refusal"); fi
-          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "Reviewer-chan posted no review: $reason. Details: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Request it again, or ask the tech lead."
+          say "Reviewer-chan posted no review of \`${HEAD_SHA:0:7}\`: $reason. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Comment /reviewer-chan to try again, or ask the tech lead."
+
+      # A newer request cancels this run. The notice token may have expired by then (it lasts an
+      # hour), so a fresh one marks the status comment stopped, unless the review already posted.
+      - name: App token after a cancel
+        id: cancel_token
+        if: cancelled() && steps.status.outputs.id != '' && steps.post.outcome != 'success'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23ligcErlDxeTcwF4c # the Reviewer-chan app (ID 5145047); a client ID is not a secret
+          private-key: ${{ secrets.REVIEWER_CHAN_PRIVATE_KEY }}
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Mark the status comment stopped
+        if: cancelled() && steps.cancel_token.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.cancel_token.outputs.token }}
+          STATUS_ID: ${{ steps.status.outputs.id }}
+        run: |
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" > /dev/null \
+            -f body="Reviewer-chan stopped this review of \`${HEAD_SHA:0:7}\`: a newer request replaced it, or someone cancelled the run. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            || echo "::warning::Could not update the status comment."

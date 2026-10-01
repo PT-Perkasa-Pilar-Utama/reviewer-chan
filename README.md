@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   review:
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.2.0
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.3.0
     with:
       daily_cap: 10
       tech_leads: your-login # logins separated by spaces or commas
@@ -85,6 +85,7 @@ The engine (Claude or OpenCode) reads; the workflow writes.
 - Comments reach the engine only from people with write access.
 - The rules come from the base branch. The workflow picks the checklist, not Claude.
 - The skill's scripts refuse files outside the review folders and inside any `.git` folder, by real path.
+- Each request gets an eyes reaction and one status comment, which changes to the outcome: the review's link, why nothing was posted, or that a newer request replaced it.
 - The review posts as a comment or a request for changes. It never approves. A round with nothing open dismisses Reviewer-chan's earlier requests for changes, so it does not keep the PR blocked.
 - Every run uploads its drafts, verdicts and gate results as an artifact for 7 days. A file holding a credential-shaped or long encoded string is withheld from it.
 - The posted body has no images, raw HTML, mentions, or links other than the repo's own files at a pinned commit. A failed check posts a fixed sentence, never text from the PR or from Claude.
