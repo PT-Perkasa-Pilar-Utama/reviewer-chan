@@ -117,6 +117,7 @@ jobs:
         run: |
           lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
           retry() { local i; for i in 1 2 3; do "$@" && return 0; [ "$i" -eq 3 ] || sleep $((i * 5)); done; return 1; }
+          gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
           stop() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
           if [ "$EVENT" = pull_request_target ] && [ "$ACTION" = labeled ]; then
             [ "$LABEL" = reviewer-chan ] || stop "Not a trigger: the label is not reviewer-chan."
@@ -137,7 +138,12 @@ jobs:
           author=$(jq -r .author.login <<< "$view")
           # Write access decides, not author_association: a member who hides their org
           # membership shows as CONTRIBUTOR. Any API error counts as no access.
-          perm=$(retry gh api "repos/$GITHUB_REPOSITORY/collaborators/$LOGIN/permission" --jq .permission 2> /dev/null || true)
+          # Every account gets an answer ("read" for outsiders); only a missing account is a 404.
+          # Any other error fails the gate, so the notify job says so instead of a silent "no".
+          if ! perm=$(retry gh api "repos/$GITHUB_REPOSITORY/collaborators/$LOGIN/permission" --jq .permission 2> "$RUNNER_TEMP/perm.err"); then
+            grep -q 'HTTP 404' "$RUNNER_TEMP/perm.err" || { echo "::error::The permission check for $LOGIN failed."; exit 1; }
+            perm=""
+          fi
           role=""
           for lead in $(printf '%s' "$LEADS" | tr ',' ' '); do
             if [ "$(lower "$lead")" = "$(lower "$LOGIN")" ]; then role="tech lead"; fi
@@ -195,35 +201,11 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
 
-      # A reviewer-chan environment open to every branch would let any writer's workflow read the
-      # secrets, so the job refuses to use one. Claude runs when its token exists; otherwise
-      # OpenCode, whose free models need no key, runs the model the repo names.
-      - name: Check the environment and pick the engine
-        id: engine
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          KEY: ${{ secrets.REVIEWER_CHAN_PRIVATE_KEY }}
-          OPENCODE_MODEL: ${{ inputs.opencode_model }}
-        run: |
-          setup="The tech lead must fix the repo's Reviewer-chan setup; asking again does not help until then."
-          refuse() { printf '%s\n%s\n' "$1" "$2" > "$RUNNER_TEMP/refusal"; echo "::error::$1"; exit 1; }
-          retry() { local i; for i in 1 2 3; do "$@" && return 0; [ "$i" -eq 3 ] || sleep $((i * 10)); done; return 1; }
-          limited=$(retry gh api "repos/$GITHUB_REPOSITORY/environments/reviewer-chan" --jq '.deployment_branch_policy != null')
-          [ "$limited" = "true" ] || refuse "the reviewer-chan environment is open to every branch; limit it to main (docs/03-token.md in reviewer-chan-setup)" "$setup"
-          [ -n "$KEY" ] || refuse "REVIEWER_CHAN_PRIVATE_KEY is not a secret of the reviewer-chan environment (docs/04-admin.md in reviewer-chan-setup)" "$setup"
-          if [ -n "$TOKEN" ]; then
-            echo "engine=claude" >> "$GITHUB_OUTPUT"
-          elif [ -n "$OPENCODE_MODEL" ]; then
-            echo "engine=opencode" >> "$GITHUB_OUTPUT"
-          else
-            refuse "no engine: the reviewer-chan environment has no CLAUDE_CODE_OAUTH_TOKEN and the repo sets no REVIEWER_CHAN_OPENCODE_MODEL (docs/03-token.md in reviewer-chan-setup)" "$setup"
-          fi
-
       # No status comment: a comment gets an eyes reaction, and the label comes off, so someone can
       # add it again for the next round. The review itself is the answer; a failure gets a comment.
       - name: Acknowledge the request
         if: github.event_name == 'issue_comment' || github.event.action == 'labeled'
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ steps.notice_token.outputs.token }}
           COMMENT_ID: ${{ github.event.comment.id }}
@@ -236,19 +218,56 @@ jobs:
               || echo "::warning::Could not remove the reviewer-chan label."
           fi
 
+      # A reviewer-chan environment open to every branch would let any writer's workflow read the
+      # secrets, so the job refuses to use one. Claude runs when its token exists; otherwise
+      # OpenCode, whose free models need no key, runs the model the repo names.
+      - name: Check the environment and pick the engine
+        id: engine
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          KEY: ${{ secrets.REVIEWER_CHAN_PRIVATE_KEY }}
+          OPENCODE_MODEL: ${{ inputs.opencode_model }}
+        run: |
+          setup="The tech lead must fix the repo's Reviewer-chan setup; asking again does not help until then."
+          refuse() { printf '%s\n%s\n' "$1" "$2" > "$RUNNER_TEMP/refusal"; echo "::error::$1"; exit 1; }
+          retry() { local i; for i in 1 2 3; do "$@" && return 0; [ "$i" -eq 3 ] || sleep $((i * 10)); done; return 1; }
+          gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
+          limited=$(retry gh api "repos/$GITHUB_REPOSITORY/environments/reviewer-chan" --jq '.deployment_branch_policy != null')
+          [ "$limited" = "true" ] || refuse "the reviewer-chan environment is open to every branch; limit it to main (docs/03-token.md in reviewer-chan-setup)" "$setup"
+          [ -n "$KEY" ] || refuse "REVIEWER_CHAN_PRIVATE_KEY is not a secret of the reviewer-chan environment (docs/04-admin.md in reviewer-chan-setup)" "$setup"
+          if [ -n "$TOKEN" ]; then
+            echo "engine=claude" >> "$GITHUB_OUTPUT"
+          elif [ -n "$OPENCODE_MODEL" ]; then
+            echo "engine=opencode" >> "$GITHUB_OUTPUT"
+          else
+            refuse "no engine: the reviewer-chan environment has no CLAUDE_CODE_OAUTH_TOKEN and the repo sets no REVIEWER_CHAN_OPENCODE_MODEL (docs/03-token.md in reviewer-chan-setup)" "$setup"
+          fi
+
       # Every comment that starts with /reviewer-chan starts a run of the calling workflow, and the
       # gate skips most. A review counts only when its review job ran.
       - name: Count today's reviews
         id: cap
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
           CALLER: ${{ inputs.caller_workflow }}
         run: |
+          retry() { local i; for i in 1 2 3; do "$@" && return 0; [ "$i" -eq 3 ] || sleep $((i * 10)); done; return 1; }
+          gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
+          # Fails closed: an API error stops the job, and a full page counts as over the cap, so
+          # comment spam cannot push today's reviews out of the window.
+          limit=1000
+          runs=$(retry gh run list -R "$GITHUB_REPOSITORY" --workflow "$CALLER" --created ">=$(date -u +%F)" --limit "$limit" \
+            --json databaseId,conclusion)
           used=0
-          for id in $(gh run list -R "$GITHUB_REPOSITORY" --workflow "$CALLER" --created ">=$(date -u +%F)" --limit 200 \
-              --json databaseId,conclusion --jq ".[] | select(.databaseId != $GITHUB_RUN_ID and .conclusion != \"skipped\" and .conclusion != \"cancelled\") | .databaseId"); do
-            ran=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" \
-              --jq '[.jobs[] | select((.name | endswith("/ review")) and .conclusion != "skipped" and .conclusion != "cancelled")] | length' || true)
+          if [ "$(jq length <<< "$runs")" -ge "$limit" ]; then used=$DAILY_CAP; fi
+          for id in $(jq -r ".[] | select(.databaseId != $GITHUB_RUN_ID and .conclusion != \"skipped\") | .databaseId" <<< "$runs"); do
+            [ "$used" -lt "$DAILY_CAP" ] || break
+            # A review counts once its model step started, so a cancelled one counts too.
+            ran=$(retry gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" \
+              --jq '[.jobs[] | select(.name | endswith("/ review")) | .steps[]? | select(.name == "Review, verify, and fix" and .started_at != null and .conclusion != "skipped")] | length')
             if [ "${ran:-0}" -gt 0 ]; then used=$((used + 1)); fi
           done
           echo "Reviews today before this one: $used of $DAILY_CAP"
@@ -299,7 +318,7 @@ jobs:
       # step holds no secret except an optional OpenCode key.
       - name: Install the engine while CI finishes
         id: install
-        timeout-minutes: 30
+        timeout-minutes: 50
         env:
           GH_TOKEN: ${{ github.token }}
           ENGINE: ${{ steps.engine.outputs.engine }}
@@ -332,7 +351,8 @@ jobs:
           }
           install_engine > "$RUNNER_TEMP/install.log" 2>&1 &
           installer=$!
-          gh pr checks "$PR" -R "$GITHUB_REPOSITORY" --required --watch --interval 30 || true
+          # A long CI does not block the review: after 30 minutes it starts with the checks as they are.
+          timeout 1800 gh pr checks "$PR" -R "$GITHUB_REPOSITORY" --required --watch --interval 30 || true
           if wait "$installer"; then
             cat "$RUNNER_TEMP/install.log"
           else
@@ -345,13 +365,16 @@ jobs:
       # step posts it, and job logs are public on a public repo.
       - name: Prepare the inputs
         id: prepare
+        timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           refuse() { printf '%s\n%s\n' "$1" "$2" > "$RUNNER_TEMP/refusal"; echo "::error::$1"; exit 1; }
           retry() { local i; for i in 1 2 3; do "$@" && return 0; [ "$i" -eq 3 ] || sleep $((i * 10)); done; return 1; }
           # save FILE CMD...: a retried read lands whole or not at all.
-          save() { local out=$1; shift; if retry "$@" > "$out.part"; then mv "$out.part" "$out"; else return 1; fi; }
+          gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
+          into() { local out=$1; shift; "$@" > "$out.part"; }
+          save() { local out=$1; shift; if retry into "$out" "$@"; then mv "$out.part" "$out"; else rm -f "$out.part"; return 1; fi; }
           moved="the pull request changed after the request, so its review would not match what was requested"
           mkdir -p "$IN" "$OUT"
           # Auth for this one fetch only, never written to a config Claude could read.
@@ -384,8 +407,14 @@ jobs:
           [ "$(jq -r .headRefOid "$IN/pr.json")" = "$HEAD_SHA" ] || refuse "$moved"
           jq -r '.body // ""' "$IN/pr.json" > "$IN/body.md"
           save "$IN/pr.diff" gh pr diff "$PR" -R "$GITHUB_REPOSITORY"
-          gh pr checks "$PR" -R "$GITHUB_REPOSITORY" --required --json name,bucket,state > "$IN/checks.json" 2> /dev/null || true
-          jq -e 'type == "array"' "$IN/checks.json" > /dev/null 2>&1 || echo '[]' > "$IN/checks.json"
+          # gh exits non-zero while checks fail or wait, so only an answer that is not a list is retried.
+          for i in 1 2 3; do
+            gh pr checks "$PR" -R "$GITHUB_REPOSITORY" --required --json name,bucket,state > "$IN/checks.json" 2> "$RUNNER_TEMP/checks.err" || true
+            if jq -e 'type == "array"' "$IN/checks.json" > /dev/null 2>&1; then break; fi
+            echo '[]' > "$IN/checks.json"
+            if grep -q 'no required checks' "$RUNNER_TEMP/checks.err"; then break; fi
+            [ "$i" -eq 3 ] || sleep $((i * 10))
+          done
           jq -r '.[] | "\(.name)\t\(.bucket)\t\(.state)"' "$IN/checks.json" > "$IN/checks.txt"
 
           # Earlier rounds count only when Reviewer-chan posted them. --jq would run per page.
@@ -406,11 +435,17 @@ jobs:
           save "$RUNNER_TEMP/review-pages.json" gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/comments" --paginate
           jq -s 'add // []' "$RUNNER_TEMP/issue-pages.json" > "$RUNNER_TEMP/issue-comments.json"
           jq -s 'add // []' "$RUNNER_TEMP/review-pages.json" > "$RUNNER_TEMP/review-comments.json"
-          writers=$(jq -r '.[].user.login' "$RUNNER_TEMP/issue-comments.json" "$RUNNER_TEMP/review-comments.json" | sort -u \
-            | while IFS= read -r who; do
-                p=$(retry gh api "repos/$GITHUB_REPOSITORY/collaborators/$who/permission" --jq .permission 2>/dev/null || true)
-                case "$p" in (admin|write) echo "$who" ;; esac
-              done | jq -R . | jq -s .)
+          # A lookup that fails after its retries stops the step: dropping a writer's replies would
+          # keep findings open that they answered. Logins hold no spaces.
+          writers=""
+          for who in $(jq -r '.[].user.login' "$RUNNER_TEMP/issue-comments.json" "$RUNNER_TEMP/review-comments.json" | sort -u); do
+            if ! p=$(retry gh api "repos/$GITHUB_REPOSITORY/collaborators/$who/permission" --jq .permission 2> "$RUNNER_TEMP/perm.err"); then
+              grep -q 'HTTP 404' "$RUNNER_TEMP/perm.err" || refuse "reading who may answer in the thread failed" ""
+              p=""
+            fi
+            case "$p" in (admin|write) writers="$writers $who" ;; esac
+          done
+          writers=$(printf '%s\n' $writers | jq -R . | jq -s 'map(select(. != ""))')
           {
             jq -r --argjson w "$writers" '.[] | select(.user.login as $l | $w | index($l)) | "### \(.user.login), \(.created_at)\n\n\(.body)\n"' \
               "$RUNNER_TEMP/issue-comments.json"
@@ -446,6 +481,9 @@ jobs:
           limit() { if command -v timeout > /dev/null; then timeout "$@"; else shift; "$@"; fi; }
           CLAUDE="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
           OPENCODE="${OPENCODE_BIN:-/opt/opencode/opencode}"
+          ENGINE_NAME=Claude
+          if [ "$ENGINE" = opencode ]; then ENGINE_NAME=OpenCode; fi
+          LAST_FAULT=""
           SOURCES="${CLAUDE_SETTING_SOURCES:-user}"
           CLAUDE_MODEL="${CLAUDE_MODEL:-claude-sonnet-5-5}"
           CLAUDE_EFFORT="${CLAUDE_EFFORT:-high}"
@@ -459,22 +497,6 @@ jobs:
           fi
           cred='sk-ant-|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_|-----BEGIN [A-Z ]*PRIVATE KEY'
 
-          # The evidence artifact is public on a public repo, and a refused draft is in it. On any
-          # exit, a file with a credential-shaped string or a long encoded run the diff does not
-          # hold is withheld, as the gate would withhold the body.
-          withhold() {
-            local f run bad
-            for f in "$EVIDENCE"/*; do
-              [ -f "$f" ] || continue
-              bad=
-              if grep -E -q "$cred" "$f"; then bad=1; fi
-              for run in $(sed -E "s#https://github.com/$GITHUB_REPOSITORY/blob/[0-9a-f]{40}/##g" "$f" | grep -oE '[A-Za-z0-9+=_-]{41,}' || true); do
-                if ! grep -qF -- "$run" "$IN/pr.diff"; then bad=1; break; fi
-              done
-              if [ -n "$bad" ]; then echo "withheld: this file held a credential-shaped or long encoded string" > "$f"; fi
-            done
-          }
-          trap withhold EXIT
 
           # Claude: reads under the workspace and the review folders, writes under out, and the
           # skill's two scripts. Denied: shell syntax that chains, redirects, expands or
@@ -523,7 +545,7 @@ jobs:
             if [ "$name" = review ]; then secs=2700; fi
             OPENCODE_CONFIG_CONTENT="$config" OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_CLAUDE_CODE=1 \
               limit "$secs" "$OPENCODE" run "${oc_args[@]}" --agent "$agent" --format json "$@" \
-              > "$RUNNER_TEMP/$name.jsonl" 2> "$RUNNER_TEMP/$name.err" || true
+              > "$RUNNER_TEMP/$name.jsonl" 2> "$RUNNER_TEMP/$name.err" || echo "$?" > "$RUNNER_TEMP/$name.exit"
           }
 
           claude_run() {  # $1 max turns, $2 log name, then session flags; the prompt comes on stdin
@@ -532,7 +554,7 @@ jobs:
             limit 1500 "$CLAUDE" -p "$@" --model "$CLAUDE_MODEL" --effort "$CLAUDE_EFFORT" \
               --setting-sources "$SOURCES" --strict-mcp-config --max-turns "$turns" \
               --add-dir "$ROOT" "$SKILL" --allowedTools "$allow" --disallowedTools "$deny" \
-              --output-format stream-json --verbose > "$RUNNER_TEMP/$name.jsonl" 2> "$RUNNER_TEMP/$name.err" || true
+              --output-format stream-json --verbose > "$RUNNER_TEMP/$name.jsonl" 2> "$RUNNER_TEMP/$name.err" || echo "$?" > "$RUNNER_TEMP/$name.exit"
           }
 
           summarize() {  # $1 log name: totals, denied calls, the last message, and stderr when the engine gave no result
@@ -563,11 +585,12 @@ jobs:
             fi
           }
 
-          # The engine's own failure, read from its log: auth, limit, busy (worth one more try after
-          # a pause: an overloaded API, a crash), or nothing. A session that hit its turn limit is
-          # not a failure; it gets the nudge or the fix like any other.
+          # The engine's own failure, read from its log: auth, limit, rate (a 429 that may pass), busy
+          # (an overloaded API or a crash), or nothing. A session that hit its turn or time limit is
+          # not a failure: it can be resumed, and starting over would only spend the same time again.
           fault() {  # $1 log name
             local log="$RUNNER_TEMP/$1.jsonl" status="" text
+            if [ "$(cat "$RUNNER_TEMP/$1.exit" 2> /dev/null)" = 124 ]; then return 0; fi
             if [ "$ENGINE" = claude ]; then
               grep -q '"type":"result"' "$log" 2> /dev/null || { echo busy; return 0; }
               [ "$(jq -r 'select(.type == "result") | .is_error' "$log" | tail -n 1)" = true ] || return 0
@@ -579,29 +602,39 @@ jobs:
               grep -q '"type":"error"' "$log" || return 0
               text=$(jq -R -r 'fromjson? // empty | select(.type == "error") | tostring' "$log" | tail -n 5)
             fi
+            # Status codes first; the text only in the CLI's own wording, so a PR about auth code
+            # never reads as a refused token.
             case "$status $(printf '%s' "$text" | tr '[:upper:]' '[:lower:]')" in
-              # Status codes first; the text only in the CLI's own wording, so a PR about auth code
-              # never reads as a refused token.
-              (401* | 403* | *"invalid api key"* | *"please run /login"*) echo auth ;;
-              (429* | *"usage limit reached"*) echo limit ;;
+              (401* | *"invalid api key"* | *"please run /login"*) echo auth ;;
+              (*"usage limit reached"*) echo limit ;;
+              (429*) echo rate ;;
               (*) echo busy ;;
             esac
           }
 
           # Retrying these cannot help, so the requester hears why at once.
           stop_on() {  # $1 fault
-            local name=Claude
-            if [ "$ENGINE" = opencode ]; then name=OpenCode; fi
             case "$1" in
-              (auth) refuse "$name refused its credentials (an expired or revoked token)" \
+              (auth) refuse "$ENGINE_NAME refused its credentials (an expired or revoked token)" \
                 "The tech lead must store a new token for the engine (docs/03-token.md in reviewer-chan-setup); asking again does not help until then." ;;
-              (limit) refuse "$name hit its usage or rate limit" "Ask again after the limit resets, or ask the tech lead." ;;
+              (limit) refuse "$ENGINE_NAME hit its usage or rate limit" "Ask again after the limit resets, or ask the tech lead." ;;
             esac
           }
 
+          # $1 log name, $2 try; refuses on auth or limit, and says whether one more try may help.
+          worth_retry() {
+            local f
+            f=$(fault "$1")
+            LAST_FAULT=$f
+            stop_on "$f"
+            if [ "$f" = rate ] && [ "$2" -eq 2 ]; then stop_on limit; fi
+            case "$f" in (busy | rate) [ "$2" -eq 1 ] ;; (*) return 1 ;; esac
+          }
+
           start_review() {  # $1 log name; a busy engine gets one more try after a pause
-            local try name=$1 f
+            local try name=$1
             for try in 1 2; do
+              rm -f "$RUNNER_TEMP/$name.exit"
               if [ "$ENGINE" = claude ]; then
                 SID=$(python3 -c 'import uuid; print(uuid.uuid4())')
                 claude_run 150 "$name" --session-id "$SID" < "$RUNNER_TEMP/review-prompt.md"
@@ -610,18 +643,17 @@ jobs:
                 SID=$(jq -R -r 'fromjson? // empty | .sessionID // empty' "$RUNNER_TEMP/$name.jsonl" | head -n 1)
               fi
               summarize "$name"
-              f=$(fault "$name")
-              stop_on "$f"
-              if [ "$f" != busy ] || [ "$try" -eq 2 ] || [ -s "$OUT/review.md" ]; then return 0; fi
-              echo "::warning::$ENGINE failed ($name); trying again in 60 seconds"
+              if ! worth_retry "$name" "$try" || [ -s "$OUT/review.md" ]; then return 0; fi
+              echo "::warning::$ENGINE_NAME failed ($name); trying again in 60 seconds"
               sleep 60
               name="$1-again"
             done
           }
 
           resume_review() {  # $1 log name, $2 prompt file; fails when the session is gone
-            local try name=$1 f
+            local try name=$1
             for try in 1 2; do
+              rm -f "$RUNNER_TEMP/$name.exit"
               if [ "$ENGINE" = claude ]; then
                 ls "$HOME"/.claude/projects/*/"$SID".jsonl > /dev/null 2>&1 || return 1
                 claude_run 40 "$name" --resume "$SID" < "$2"
@@ -630,10 +662,8 @@ jobs:
                 opencode_run "$oc_review" reviewer "$name" --session "$SID" < "$2"
               fi
               summarize "$name"
-              f=$(fault "$name")
-              stop_on "$f"
-              if [ "$f" != busy ] || [ "$try" -eq 2 ]; then return 0; fi
-              echo "::warning::$ENGINE failed ($name); trying again in 60 seconds"
+              worth_retry "$name" "$try" || return 0
+              echo "::warning::$ENGINE_NAME failed ($name); trying again in 60 seconds"
               sleep 60
               name="$1-again"
             done
@@ -684,6 +714,12 @@ jobs:
             size=$(wc -c < "$body")
             [ "$size" -le 32768 ] || echo "the body is over the 32 KB limit; shorten it" >> "$G"
             if grep -E -q "$cred" "$body"; then echo "the body holds something shaped like a credential; remove it" >> "$G"; fi
+            for secret in "${CLAUDE_CODE_OAUTH_TOKEN:-}" "${OPENCODE_API_KEY:-}"; do
+              [ "${#secret}" -ge 16 ] || continue
+              if grep -qF -- "$secret" "$body" || tr -d '[:space:]' < "$body" | grep -qF -- "$secret"; then
+                echo "the body holds a credential; remove it" >> "$G"
+              fi
+            done
             # Pinned rule links carry a 40-character SHA; drop that known prefix. A 41+ character run
             # of token or base64 characters passes only when the diff holds it, like a long test name.
             for run in $(sed -E "s#https://github.com/$GITHUB_REPOSITORY/blob/[0-9a-f]{40}/##g" "$body" | grep -oE '[A-Za-z0-9+=_-]{41,}' || true); do
@@ -698,7 +734,8 @@ jobs:
             done < <(jq -r '.[] | select(.bucket != "pass" and .bucket != "skipping") | .name' "$IN/checks.json")
             # A Where line points at code: a file in the PR head or the base checkout (a finding may
             # cite a file the PR deleted, or a caller outside the diff), never an input like checks.txt.
-            python3 - "$SKILL/scripts" "$body" "$HEAD_DIR" "$(jq -r .base_dir "$IN/pr.json")" >> "$G" <<'PY'
+            python3 - "$SKILL/scripts" "$body" "$HEAD_DIR" "$(jq -r .base_dir "$IN/pr.json")" >> "$G" <<'PY' \
+              || echo "the workflow's Where-line check crashed on this body; check each Where line names a file" >> "$G"
           import os, sys
           sys.path.insert(0, sys.argv[1])
           import review_body as rb
@@ -714,7 +751,8 @@ jobs:
                       print(f'{fid}: its Where line names "{path}", which is not a file in the pull request or the base branch; point it at code, or put a CI result on the CI line')
           PY
             # Fixes may change a finding's severity or text, never drop it or change its status.
-            python3 - "$SKILL/scripts" "$EVIDENCE/draft-1.md" "$body" >> "$G" <<'PY'
+            python3 - "$SKILL/scripts" "$EVIDENCE/draft-1.md" "$body" >> "$G" <<'PY' \
+              || echo "the workflow's finding-table check crashed on this body; keep the table in the skeleton's format" >> "$G"
           import sys
           sys.path.insert(0, sys.argv[1])
           import review_body as rb
@@ -776,12 +814,18 @@ jobs:
           retry_advice="Ask again; a new request starts a fresh review. If it fails again, ask the tech lead: the run's evidence artifact holds what happened."
           # A session can end its turn without writing the body (seen on GitHub: 48 turns, then a
           # clean stop). It gets one nudge in the same session; a lost session starts over once.
+          busy_reason="$ENGINE_NAME's API failed twice in a row"
+          busy_advice="Ask again in a few minutes. If it keeps failing, ask the tech lead."
           start_review review
           if [ ! -s "$OUT/review.md" ]; then
+            [ "$LAST_FAULT" != busy ] || refuse "$busy_reason" "$busy_advice"
             echo "::warning::The review ended without a body; asking the same session to finish it."
             if ! resume_review finish "$RUNNER_TEMP/finish-prompt.md"; then start_review review-2; fi
           fi
-          [ -s "$OUT/review.md" ] || refuse "the model ended twice without writing a review" "$retry_advice"
+          if [ ! -s "$OUT/review.md" ]; then
+            [ "$LAST_FAULT" != busy ] || refuse "$busy_reason" "$busy_advice"
+            refuse "the model ended twice without writing a review" "$retry_advice"
+          fi
           cp "$OUT/review.md" "$EVIDENCE/draft-1.md"
 
           verifies=0
@@ -795,7 +839,10 @@ jobs:
               break
             fi
             cp "$G" "$EVIDENCE/gate-$verifies.txt"
-            [ "$verifies" -lt 3 ] || refuse "the review did not pass its checks within two fixes" "$retry_advice"
+            if [ "$verifies" -ge 3 ]; then
+              grep -qv '^verify:' "$G" || refuse "the verifier gave no usable answer three times" "$busy_advice"
+              refuse "the review did not pass its checks within two fixes" "$retry_advice"
+            fi
             # Lines from the check that start "verify:" are the verifier's own faults (often an API
             # error that left its answer empty): rerun it alone, after a pause.
             if grep -qv '^verify:' "$G"; then
@@ -803,6 +850,7 @@ jobs:
               fixes=$((fixes + 1))
               cp "$G" "$IN/feedback.md"
               resume_review "fix-$fixes" "$RUNNER_TEMP/fix-prompt.md" || refuse "the review session was lost before a fix" "$retry_advice"
+              [ "$LAST_FAULT" != busy ] || refuse "$busy_reason" "$busy_advice"
               cp "$OUT/review.md" "$EVIDENCE/draft-$((fixes + 1)).md"
             else
               sleep 20
@@ -814,8 +862,36 @@ jobs:
       # Every run keeps its drafts, verdicts and gate results, so a refusal shows its reasons.
       # The posted body would be public anyway. Full transcripts are not kept: only each session's
       # denied calls and last message.
-      - name: Keep the evidence
+      # Its own step, so a review step killed by its time limit cannot skip it. A file with a
+      # credential-shaped string, a secret's exact value, or a long encoded run the diff does not
+      # hold is withheld, as the gate withholds the body.
+      - name: Scrub the evidence
+        id: scrub
         if: ${{ !cancelled() && steps.loop.outcome != 'skipped' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          cred='sk-ant-|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_|-----BEGIN [A-Z ]*PRIVATE KEY'
+          for f in "$RUNNER_TEMP"/evidence/*; do
+            [ -f "$f" ] || continue
+            bad=
+            if grep -E -q "$cred" "$f"; then bad=1; fi
+            for secret in "$CLAUDE_CODE_OAUTH_TOKEN" "$OPENCODE_API_KEY"; do
+              [ "${#secret}" -ge 16 ] || continue
+              if grep -qF -- "$secret" "$f" || tr -d '[:space:]' < "$f" | grep -qF -- "$secret"; then bad=1; fi
+            done
+            for run in $(sed -E "s#https://github.com/$GITHUB_REPOSITORY/blob/[0-9a-f]{40}/##g" "$f" | grep -oE '[A-Za-z0-9+=_-]{41,}' || true); do
+              if ! grep -qF -- "$run" "$IN/pr.diff"; then bad=1; break; fi
+            done
+            if [ -n "$bad" ]; then echo "withheld: this file held a credential-shaped or long encoded string" > "$f"; fi
+          done
+
+      - name: Keep the evidence
+        if: ${{ !cancelled() && steps.scrub.outcome == 'success' }}
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reviewer-chan-evidence
@@ -838,6 +914,7 @@ jobs:
       - name: Post
         id: post
         if: steps.loop.outputs.ok == 'true'
+        timeout-minutes: 15
         env:
           GH_TOKEN: ${{ steps.post_token.outputs.token }}
           DRAFT_ON_CHANGES: ${{ inputs.draft_on_request_changes }}
@@ -846,6 +923,7 @@ jobs:
         run: |
           refuse() { printf '%s\n%s\n' "$1" "$2" > "$RUNNER_TEMP/refusal"; echo "::error::$1"; exit 1; }
           retry() { local i; for i in 1 2 3; do "$@" && return 0; [ "$i" -eq 3 ] || sleep $((i * 10)); done; return 1; }
+          gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
           approved_label="reviewer-chan: approved"
           approved_uri=$(jq -rn --arg s "$approved_label" '$s | @uri')
           body="$RUNNER_TEMP/posted.md"
@@ -892,28 +970,38 @@ jobs:
                 || echo "::warning::Could not dismiss Reviewer-chan's review $id. Dismiss it by hand."
             done
           }
-          if [ "$verdict" = --comment ]; then dismiss_earlier; fi
+          # The review covers HEAD_SHA only. A push during the review would put an approval on code
+          # nobody read, so a moved head posts nothing.
+          now=$(retry gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
+          [ "$now" = "$HEAD_SHA" ] || refuse "the pull request changed during the review, so the review would not match it" ""
           # A call that timed out may still have posted, so each retry first looks for the review.
           posted() {
             gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
               | jq -s -e --rawfile b "$body" --arg sha "$HEAD_SHA" \
-                  '[add[] | select(.user.login == "reviewer-chan[bot]" and .commit_id == $sha and (.body | rtrimstr("\n")) == ($b | rtrimstr("\n")))] | length > 0' > /dev/null
+                  '[add[] | select(.user.login == "reviewer-chan[bot]" and .commit_id == $sha
+                    and (.body | sub("\\s+$"; "")) == ($b | sub("\\s+$"; "")))] | length > 0' > /dev/null
           }
+          # Pinned to HEAD_SHA, so a push that lands mid-post cannot move the review to new code.
           review() {  # $1 verdict flag
-            local i
+            local i event
+            case "$1" in (--approve) event=APPROVE ;; (--request-changes) event=REQUEST_CHANGES ;; (*) event=COMMENT ;; esac
             for i in 1 2 3; do
-              gh pr review "$PR" -R "$GITHUB_REPOSITORY" "$1" --body-file "$body" && return 0
+              gh api -X POST "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event="$event" \
+                -F "body=@$body" > /dev/null && return 0
               sleep $((i * 10))
               if posted; then return 0; fi
             done
             return 1
           }
+          failed="the review passed its checks, but GitHub refused to post it"
           if ! review "$verdict"; then
-            [ "$verdict" = --approve ] || refuse "the review passed its checks, but GitHub refused to post it" "Ask again, or ask the tech lead."
+            [ "$verdict" = --approve ] || refuse "$failed" "Ask again, or ask the tech lead."
             echo "::warning::Could not approve the pull request; posting the review as a comment."
-            dismiss_earlier
-            review --comment || refuse "the review passed its checks, but GitHub refused to post it" "Ask again, or ask the tech lead."
+            verdict=--comment
+            review --comment || refuse "$failed" "Ask again, or ask the tech lead."
           fi
+          # Only after the new round landed, so a failed post leaves the PR blocked as it was.
+          if [ "$verdict" = --comment ]; then dismiss_earlier; fi
           echo "told=true" >> "$GITHUB_OUTPUT"
           # A PR with open findings goes back to draft, so nobody merges it by mistake; GitHub's
           # timeline shows the move. A clean round never marks it ready: the author decides that.
@@ -940,6 +1028,7 @@ jobs:
       - name: Say why nothing was posted
         id: why
         if: failure() && steps.notice_token.outputs.token != '' && steps.cap.outputs.over != 'true'
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ steps.post_token.outputs.token || steps.notice_token.outputs.token }}
           ENGINE_STEP: ${{ steps.engine.outcome }}
@@ -948,8 +1037,10 @@ jobs:
           INSTALL_STEP: ${{ steps.install.outcome }}
           PREPARE_STEP: ${{ steps.prepare.outcome }}
           LOOP_STEP: ${{ steps.loop.outcome }}
+          LOOP_OK: ${{ steps.loop.outputs.ok }}
           POST_STEP: ${{ steps.post.outcome }}
         run: |
+          gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
           again="Add the reviewer-chan label or comment /reviewer-chan to try again."
           if [ -s "$RUNNER_TEMP/refusal" ]; then
             reason=$(sed -n 1p "$RUNNER_TEMP/refusal")
@@ -961,7 +1052,7 @@ jobs:
               reason="a download failed while setting up (GitHub, the package mirror, or the engine's installer)"
             elif [ "$PREPARE_STEP" = failure ]; then reason="reading the pull request from GitHub failed"
             elif [ "$LOOP_STEP" = failure ]; then reason="the review step stopped on an error or ran out of time"
-            elif [ "$POST_STEP" = failure ]; then reason="the review passed its checks, but posting it failed"
+            elif [ "$POST_STEP" = failure ] || [ "$LOOP_OK" = true ]; then reason="the review passed its checks, but posting it failed"
             else reason="it stopped on an error"
             fi
           fi
@@ -980,9 +1071,14 @@ jobs:
   # request for the same PR replaced it, or a person stopped it.
   notify:
     needs: [gate, review]
+    # A gate failure is answered only for a trusted requester (a label needs triage access), so
+    # comment spam during a GitHub outage cannot make the app comment on every PR.
     if: >-
       always() && github.repository_owner == 'PT-Perkasa-Pilar-Utama' &&
-      (needs.gate.result == 'failure' ||
+      ((needs.gate.result == 'failure' &&
+        (github.event.action == 'labeled' ||
+         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+                  github.event.comment.author_association || github.event.pull_request.author_association))) ||
        ((needs.review.result == 'failure' || needs.review.result == 'cancelled') && needs.review.outputs.told != 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -996,6 +1092,7 @@ jobs:
           REVIEW: ${{ needs.review.result }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
         run: |
+          gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
           again="Add the reviewer-chan label or comment /reviewer-chan to try again. If it fails again, ask the tech lead."
           of=""
           if [ -n "$HEAD_SHA" ]; then of=" of \`${HEAD_SHA:0:7}\`"; fi
@@ -1035,6 +1132,7 @@ jobs:
           PR: ${{ needs.gate.outputs.pr || github.event.issue.number || github.event.pull_request.number }}
           SAY: ${{ steps.what.outputs.say }}
         run: |
+          gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
           for i in 1 2 3; do
             gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$SAY" && exit 0
             sleep $((i * 10))
