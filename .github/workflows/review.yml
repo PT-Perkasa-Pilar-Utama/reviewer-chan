@@ -264,11 +264,48 @@ jobs:
             exit 1
           fi
 
-      - name: Wait for the required CI checks
+      # The install does not need CI, so it runs while the checks finish: the runner was idle in
+      # that wait, and one apt mirror took 94 seconds for 425 kB.
+      # Claude: its own script installs it and checks the download's checksum; bubblewrap lets its
+      # env scrub run shell commands with no credentials, in their own PID namespace.
+      # OpenCode: the release file, checked against the pinned digest. It has no env scrub, so its
+      # step holds no secret except an optional OpenCode key.
+      - name: Install the engine while CI finishes
         timeout-minutes: 30
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh pr checks "$PR" -R "$GITHUB_REPOSITORY" --required --watch --interval 30 || true
+          ENGINE: ${{ steps.engine.outputs.engine }}
+        run: |
+          install_engine() {
+            if [ "$ENGINE" = claude ]; then
+              sudo apt-get update -qq
+              sudo apt-get install -y --no-install-recommends bubblewrap socat
+              if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+                sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+              fi
+              curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION"
+              "$HOME/.local/bin/claude" --version
+            else
+              curl -fsSL -o "$RUNNER_TEMP/opencode.tar.gz" \
+                "https://github.com/anomalyco/opencode/releases/download/$OPENCODE_VERSION/opencode-linux-x64.tar.gz"
+              echo "$OPENCODE_SHA256  $RUNNER_TEMP/opencode.tar.gz" | sha256sum -c -
+              sudo mkdir -p /opt/opencode
+              sudo tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C /opt/opencode
+              sudo chown -R root:root /opt/opencode
+              sudo chmod -R a-w,a+rX /opt/opencode
+              /opt/opencode/opencode --version
+            fi
+          }
+          install_engine > "$RUNNER_TEMP/install.log" 2>&1 &
+          installer=$!
+          gh pr checks "$PR" -R "$GITHUB_REPOSITORY" --required --watch --interval 30 || true
+          if wait "$installer"; then
+            cat "$RUNNER_TEMP/install.log"
+          else
+            cat "$RUNNER_TEMP/install.log"
+            echo "::error::The engine install failed; its output is above."
+            exit 1
+          fi
 
       # Every refusal is a fixed sentence, never text from the PR or from Claude: the failure
       # step posts it, and job logs are public on a public repo.
@@ -339,33 +376,6 @@ jobs:
 
           now=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
           [ "$now" = "$HEAD_SHA" ] || refuse "$moved"
-
-      # Claude: its own script installs it and checks the download's checksum; bubblewrap lets its
-      # env scrub run shell commands with no credentials, in their own PID namespace.
-      # OpenCode: the release file, checked against the pinned digest. It has no env scrub, so its
-      # step holds no secret except an optional OpenCode key.
-      - name: Install the engine
-        env:
-          ENGINE: ${{ steps.engine.outputs.engine }}
-        run: |
-          if [ "$ENGINE" = claude ]; then
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends bubblewrap socat
-            if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-            fi
-            curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLAUDE_CODE_VERSION"
-            "$HOME/.local/bin/claude" --version
-          else
-            curl -fsSL -o "$RUNNER_TEMP/opencode.tar.gz" \
-              "https://github.com/anomalyco/opencode/releases/download/$OPENCODE_VERSION/opencode-linux-x64.tar.gz"
-            echo "$OPENCODE_SHA256  $RUNNER_TEMP/opencode.tar.gz" | sha256sum -c -
-            sudo mkdir -p /opt/opencode
-            sudo tar -xzf "$RUNNER_TEMP/opencode.tar.gz" -C /opt/opencode
-            sudo chown -R root:root /opt/opencode
-            sudo chmod -R a-w,a+rX /opt/opencode
-            /opt/opencode/opencode --version
-          fi
 
       # One step, so the session and the drafts carry over: the model reviews, a new session with
       # no tools verifies, and the gates check the body. A body fault goes back to the same session
