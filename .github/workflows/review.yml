@@ -61,7 +61,7 @@ on:
 
 env:
   # The lead-review version every repo trusts. Bump it on purpose, after reading the change.
-  LEAD_REVIEW_REF: 53a511fb47de288c162b6d65bf72f77f81d232db
+  LEAD_REVIEW_REF: bb295ec41dcf02ee89e7b4dd6edf39a6f598d15d
   CLAUDE_CODE_VERSION: 2.1.286
   # OpenCode's installer checks no checksum, so the job downloads the release file and checks
   # this digest, which GitHub publishes for the release asset.
