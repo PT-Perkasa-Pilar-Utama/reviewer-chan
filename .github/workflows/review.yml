@@ -50,6 +50,14 @@ on:
         description: The OpenCode reasoning variant (provider-specific, for example high). Empty means the model's default.
         type: string
         default: ""
+      draft_on_request_changes:
+        description: Move the PR to draft when the review requests changes. The author marks it ready after the fixes.
+        type: boolean
+        default: true
+      approve_when_clean:
+        description: Approve the PR when no finding is open. False posts a clean round as a comment. Keep a required code-owner review, so a person still approves every merge.
+        type: boolean
+        default: true
 
 env:
   # The lead-review version every repo trusts. Bump it on purpose, after reading the change.
@@ -721,6 +729,8 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.post_token.outputs.token }}
           STATUS_ID: ${{ steps.status.outputs.id }}
+          DRAFT_ON_CHANGES: ${{ inputs.draft_on_request_changes }}
+          APPROVE_WHEN_CLEAN: ${{ inputs.approve_when_clean }}
         run: |
           refuse() { echo "$1" > "$RUNNER_TEMP/refusal"; echo "::error::$1"; exit 1; }
           # Edit the status comment, or post a new comment when there is none.
@@ -734,21 +744,40 @@ jobs:
             ("## Round "*" | Request Changes") verdict=--request-changes ;;
             (*) refuse "the first line is not a round header" ;;
           esac
-          if [ "$verdict" = --comment ]; then
-            # A comment does not clear Reviewer-chan's earlier request for changes, which would
-            # keep the PR blocked. Dismiss each one; a failure leaves it for a person to dismiss.
+          # An approval replaces Reviewer-chan's own earlier request for changes. The repo's
+          # required code-owner review keeps a person in front of every merge.
+          if [ "$verdict" = --comment ] && [ "$APPROVE_WHEN_CLEAN" = "true" ]; then verdict=--approve; fi
+          # A comment does not clear Reviewer-chan's earlier request for changes, which would keep
+          # the PR blocked. Dismiss each one; a failure leaves it for a person to dismiss.
+          dismiss_earlier() {
             for id in $(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
                 | jq -s -r '[(add // [])[] | select(.user.login == "reviewer-chan[bot]" and .state == "CHANGES_REQUESTED") | .id] | .[]'); do
               gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews/$id/dismissals" \
                 -f message="A newer Reviewer-chan round has no open findings." -f event=DISMISS > /dev/null \
                 || echo "::warning::Could not dismiss Reviewer-chan's review $id. Dismiss it by hand."
             done
+          }
+          if [ "$verdict" = --comment ]; then dismiss_earlier; fi
+          if ! gh pr review "$PR" -R "$GITHUB_REPOSITORY" "$verdict" --body-file "$body"; then
+            [ "$verdict" = --approve ] || exit 1
+            echo "::warning::Could not approve the pull request; posting the review as a comment."
+            dismiss_earlier
+            gh pr review "$PR" -R "$GITHUB_REPOSITORY" --comment --body-file "$body"
           fi
-          gh pr review "$PR" -R "$GITHUB_REPOSITORY" "$verdict" --body-file "$body"
-          url=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
-            | jq -s -r '[(add // [])[] | select(.user.login == "reviewer-chan[bot]")] | last | .html_url // empty')
-          say "Reviewer-chan posted its review of \`${HEAD_SHA:0:7}\`: ${url:-see the reviews below}" \
-            || echo "::warning::Could not update the status comment."
+          # A PR with open findings goes back to draft, so nobody merges it by mistake; GitHub's
+          # timeline shows the move. A clean round never marks it ready: the author decides that.
+          if [ "$verdict" = --request-changes ] && [ "$DRAFT_ON_CHANGES" = "true" ]; then
+            gh pr ready "$PR" -R "$GITHUB_REPOSITORY" --undo > /dev/null \
+              || echo "::warning::Could not move the pull request to draft."
+          fi
+          # The review is the answer now, so the status comment goes. If it cannot be removed, it
+          # links to the review instead.
+          if [ -n "$STATUS_ID" ] && ! gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" > /dev/null; then
+            url=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+              | jq -s -r '[(add // [])[] | select(.user.login == "reviewer-chan[bot]")] | last | .html_url // empty')
+            say "Reviewer-chan posted its review of \`${HEAD_SHA:0:7}\`: ${url:-see the reviews below}." \
+              || echo "::warning::Could not update the status comment."
+          fi
 
       # Once the comment has its reaction, every failure gets an answer: the posting token if it
       # was minted, else the notice token (both are app tokens with the same permissions).

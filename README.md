@@ -36,9 +36,11 @@ jobs:
     if: >-
       github.event_name == 'pull_request_target' ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/reviewer-chan'))
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.6.0
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.7.0
     with:
       daily_cap: 10
+      draft_on_request_changes: true # set false to leave the PR as it is
+      approve_when_clean: true # set false to post a clean round as a comment
       tech_leads: your-login # logins separated by spaces or commas
       claude_model: ${{ vars.REVIEWER_CHAN_CLAUDE_MODEL }}
       claude_effort: ${{ vars.REVIEWER_CHAN_CLAUDE_EFFORT }}
@@ -93,7 +95,8 @@ The engine (Claude or OpenCode) reads; the workflow writes.
 - The rules come from the base branch. The workflow picks the checklist, not Claude.
 - The skill's scripts refuse files outside the review folders and inside any `.git` folder, by real path.
 - Each request gets an eyes reaction and one status comment, which changes to the outcome: the review's link, why nothing was posted, or that a newer request replaced it.
-- The review posts as a comment or a request for changes. It never approves. A round with nothing open dismisses Reviewer-chan's earlier requests for changes, so it does not keep the PR blocked.
+- The review requests changes when a finding is open, and approves when none is (`approve_when_clean: false` posts a comment instead). A request for changes moves the PR to draft, unless the caller sets `draft_on_request_changes: false`.
+- Keep a ruleset that requires a code-owner review on `main`, with people or teams as code owners. Reviewer-chan's approval then never merges a PR alone. A round with nothing open dismisses Reviewer-chan's earlier requests for changes, so it does not keep the PR blocked.
 - Every run uploads its drafts, verdicts and gate results as an artifact for 7 days. A file holding a credential-shaped or long encoded string is withheld from it.
 - The posted body has no images, raw HTML, mentions, or links other than the repo's own files at a pinned commit. A failed check posts a fixed sentence, never text from the PR or from Claude.
 - `main` takes changes only through a reviewed pull request, and each calling repo pins a tagged commit.
