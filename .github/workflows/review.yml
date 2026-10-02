@@ -94,6 +94,8 @@ jobs:
       pr: ${{ steps.who.outputs.pr }}
       head_sha: ${{ steps.who.outputs.head_sha }}
       base_sha: ${{ steps.who.outputs.base_sha }}
+      by: ${{ steps.who.outputs.by }}
+      how: ${{ steps.who.outputs.how }}
     steps:
       # A comment asks for a review; an opened or ready PR asks on its author's behalf. Either
       # way the same rule decides who may start one.
@@ -140,6 +142,8 @@ jobs:
             echo "pr=$PR"
             echo "head_sha=$(jq -r .headRefOid <<< "$view")"
             echo "base_sha=$(jq -r .baseRefOid <<< "$view")"
+            echo "by=$LOGIN"
+            echo "how=$([ "$EVENT" = pull_request_target ] && echo opened || echo comment)"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### Reviewer-chan request"
@@ -164,6 +168,8 @@ jobs:
       PR: ${{ needs.gate.outputs.pr }}
       HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
       BASE_SHA: ${{ needs.gate.outputs.base_sha }}
+      REQUESTER: ${{ needs.gate.outputs.by }}
+      REQUESTED_HOW: ${{ needs.gate.outputs.how }}
     steps:
       # A reviewer-chan environment open to every branch would let any writer's workflow read the
       # secrets, so the job refuses to use one. Claude runs when its token exists; otherwise
@@ -372,6 +378,14 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
             | jq -s -r '[add[] | select(.user.login == "reviewer-chan[bot]" and (.body | startswith("## Round")))] | last | .body // ""' \
             > "$IN/prev.md"
+          # The footer naming who asked is the workflow's, not part of the review's format.
+          python3 - "$IN/prev.md" <<'PY'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p, encoding="utf-8").read()
+          s = re.sub(r"\n+---\n+(Requested by|Started when) @[A-Za-z0-9-]+[^\n]*\s*$", "\n", s)
+          open(p, "w", encoding="utf-8").write(s)
+          PY
 
           # The thread, by people with write access only: on a public repo anyone may comment.
           gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate | jq -s 'add' > "$RUNNER_TEMP/issue-comments.json"
@@ -738,7 +752,16 @@ jobs:
             if [ -n "$STATUS_ID" ] && gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" -f body="$1" > /dev/null; then return; fi
             gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$1"
           }
-          body="$OUT/review.md"
+          body="$RUNNER_TEMP/posted.md"
+          cp "$OUT/review.md" "$body"
+          # The workflow names who asked, after every gate: the model's body may carry no mention.
+          if printf '%s' "$REQUESTER" | grep -Eq '^[A-Za-z0-9-]+$'; then
+            if [ "$REQUESTED_HOW" = opened ]; then
+              printf '\n---\n\nStarted when @%s opened this pull request.\n' "$REQUESTER" >> "$body"
+            else
+              printf '\n---\n\nRequested by @%s.\n' "$REQUESTER" >> "$body"
+            fi
+          fi
           case "$(head -n 1 "$body")" in
             ("## Round "*" | Approve") verdict=--comment ;;
             ("## Round "*" | Request Changes") verdict=--request-changes ;;
