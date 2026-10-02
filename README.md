@@ -20,9 +20,10 @@ name: reviewer-chan
 on:
   issue_comment:
     types: [created]
-  # To review every new pull request too, remove the # from the next two lines.
-  # pull_request_target:
-  #   types: [opened, ready_for_review]
+  pull_request_target:
+    # The reviewer-chan label starts a review. To review every new pull request too, change
+    # this line to: types: [labeled, opened, ready_for_review] (docs/05-workflow.md).
+    types: [labeled]
 
 permissions:
   contents: read
@@ -34,9 +35,10 @@ jobs:
   review:
     # A cheap filter, so most comments start no job; the shared job checks the exact command.
     if: >-
-      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'pull_request_target' &&
+       (github.event.action != 'labeled' || github.event.label.name == 'reviewer-chan')) ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/reviewer-chan'))
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.8.0
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.9.0
     with:
       daily_cap: 10
       draft_on_request_changes: true # set false to leave the PR as it is

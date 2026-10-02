@@ -2,8 +2,8 @@ name: reviewer-chan review
 
 # The shared Reviewer-chan job. Each repo calls it from a short file pinned to a tagged commit
 # (see the README); Dependabot proposes each new tag there. A comment whose first line is
-# "/reviewer-chan" (or "/reviewer-chan review") starts it, from the PR author with write access
-# or a tech lead. A caller may also start it when a PR opens or is marked ready for review.
+# The reviewer-chan label, or a comment "/reviewer-chan", starts it, from the PR author with write
+# access, a tech lead, or an admin. A caller may also start it when a PR opens or is marked ready.
 #
 # Threat model: the job holds the repo tech lead's Claude token (or an OpenCode key) and the app's
 # private key, and the model reads untrusted text (the diff, the PR body, comments). So the model
@@ -86,7 +86,10 @@ jobs:
       github.repository_owner == 'PT-Perkasa-Pilar-Utama' &&
       ((github.event_name == 'issue_comment' && github.event.issue.pull_request &&
         github.event.comment.user.type != 'Bot') ||
-       (github.event_name == 'pull_request_target' && github.event.pull_request.user.type != 'Bot'))
+       (github.event_name == 'pull_request_target' && github.event.action == 'labeled' &&
+        github.event.label.name == 'reviewer-chan' && github.event.sender.type != 'Bot') ||
+       (github.event_name == 'pull_request_target' && github.event.action != 'labeled' &&
+        github.event.pull_request.user.type != 'Bot'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -97,24 +100,31 @@ jobs:
       by: ${{ steps.who.outputs.by }}
       how: ${{ steps.who.outputs.how }}
     steps:
-      # A comment asks for a review; an opened or ready PR asks on its author's behalf. Either
-      # way the same rule decides who may start one.
+      # A comment or the reviewer-chan label asks for a review; an opened or ready PR asks on its
+      # author's behalf. Either way the same rule decides who may start one.
       - name: Decide whether to start a review
         id: who
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
           BODY: ${{ github.event.comment.body }}
-          LOGIN: ${{ github.event.comment.user.login || github.event.pull_request.user.login }}
+          LOGIN: ${{ github.event.comment.user.login || (github.event.action == 'labeled' && github.event.sender.login) || github.event.pull_request.user.login }}
           PR: ${{ github.event.issue.number || github.event.pull_request.number }}
           DRAFT: ${{ github.event.pull_request.draft }}
           LEADS: ${{ inputs.tech_leads }}
         run: |
           lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
           stop() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
-          if [ "$EVENT" = pull_request_target ]; then
+          if [ "$EVENT" = pull_request_target ] && [ "$ACTION" = labeled ]; then
+            [ "$LABEL" = reviewer-chan ] || stop "Not a trigger: the label is not reviewer-chan."
+            how=label
+          elif [ "$EVENT" = pull_request_target ]; then
             [ "$DRAFT" != "true" ] || stop "PR #$PR is a draft. It gets a review when it is marked ready for review."
+            how=opened
           else
+            how=comment
             first=$(printf '%s\n' "$BODY" | head -n 1 | tr -d '\r' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')
             case "$(lower "$first")" in
               ("/reviewer-chan" | "/reviewer-chan review") ;;
@@ -136,14 +146,14 @@ jobs:
             case "$perm" in (write|admin) role="author with write access" ;; esac
           fi
           [ -n "$role" ] || stop "\`$LOGIN\` may not start a review here: only the PR author with write access, a tech lead, or a repo admin can."
-          if [ "$EVENT" = pull_request_target ]; then role="$role, PR opened"; fi
+          case "$how" in (opened) role="$role, PR opened" ;; (label) role="$role, label" ;; esac
           {
             echo "go=true"
             echo "pr=$PR"
             echo "head_sha=$(jq -r .headRefOid <<< "$view")"
             echo "base_sha=$(jq -r .baseRefOid <<< "$view")"
             echo "by=$LOGIN"
-            echo "how=$([ "$EVENT" = pull_request_target ] && echo opened || echo comment)"
+            echo "how=$how"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### Reviewer-chan request"
@@ -210,29 +220,21 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
 
-      - name: Acknowledge the comment
-        if: github.event_name == 'issue_comment'
+      # No status comment: a comment gets an eyes reaction, and the label comes off, so someone can
+      # add it again for the next round. The review itself is the answer; a failure gets a comment.
+      - name: Acknowledge the request
+        if: github.event_name == 'issue_comment' || github.event.action == 'labeled'
         env:
           GH_TOKEN: ${{ steps.notice_token.outputs.token }}
           COMMENT_ID: ${{ github.event.comment.id }}
         run: |
-          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null \
-            || echo "::warning::Could not react to the comment."
-
-      # One status comment per request. Later steps edit it to the outcome: the review's link, the
-      # reason nothing was posted, or that a newer request replaced this one.
-      - name: Post the status comment
-        id: status
-        env:
-          GH_TOKEN: ${{ steps.notice_token.outputs.token }}
-        run: |
-          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          if ! id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --jq .id \
-              -f body="Reviewer-chan is reviewing \`${HEAD_SHA:0:7}\`. It waits for the required checks first, so a review takes about 10 to 30 minutes. Run: $run_url"); then
-            echo "::warning::Could not post the status comment."
-            id=""
+          if [ "$REQUESTED_HOW" = comment ]; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null \
+              || echo "::warning::Could not react to the comment."
+          else
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/reviewer-chan" > /dev/null \
+              || echo "::warning::Could not remove the reviewer-chan label."
           fi
-          echo "id=$id" >> "$GITHUB_OUTPUT"
 
       # Every comment that starts with /reviewer-chan starts a run of the calling workflow, and the
       # gate skips most. A review counts only when its review job ran.
@@ -256,14 +258,9 @@ jobs:
         if: steps.cap.outputs.over == 'true'
         env:
           GH_TOKEN: ${{ steps.notice_token.outputs.token }}
-          STATUS_ID: ${{ steps.status.outputs.id }}
         run: |
-          # Edit the status comment, or post a new comment when there is none.
-          say() {
-            if [ -n "$STATUS_ID" ] && gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" -f body="$1" > /dev/null; then return; fi
-            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$1"
-          }
-          say "Reviewer-chan has used today's $DAILY_CAP reviews for this repo. Ask again tomorrow (UTC), or ask the tech lead."
+          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" \
+            --body "Reviewer-chan has used today's $DAILY_CAP reviews for this repo. Ask again tomorrow (UTC), or ask the tech lead."
           exit 1
 
       # The base commit, not the PR. No stored credential: the checkout is readable by Claude.
@@ -383,7 +380,7 @@ jobs:
           import re, sys
           p = sys.argv[1]
           s = open(p, encoding="utf-8").read()
-          s = re.sub(r"\n+---\n+(Requested by|Started when) @[A-Za-z0-9-]+[^\n]*\s*$", "\n", s)
+          s = re.sub(r"\n+---\n+(?:Requested by|Started when) @[A-Za-z0-9-]+[\s\S]*\Z", "\n", s)
           open(p, "w", encoding="utf-8").write(s)
           PY
 
@@ -736,32 +733,45 @@ jobs:
           permission-pull-requests: write
 
       # The body passed every gate in the step above, and nothing has run since. It posts as a
-      # comment or a request for changes: only a person approves.
+      # request for changes, or an approval that hands the merge to the tech leads.
       - name: Post
         id: post
         if: steps.loop.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ steps.post_token.outputs.token }}
-          STATUS_ID: ${{ steps.status.outputs.id }}
           DRAFT_ON_CHANGES: ${{ inputs.draft_on_request_changes }}
           APPROVE_WHEN_CLEAN: ${{ inputs.approve_when_clean }}
+          LEADS: ${{ inputs.tech_leads }}
         run: |
           refuse() { echo "$1" > "$RUNNER_TEMP/refusal"; echo "::error::$1"; exit 1; }
-          # Edit the status comment, or post a new comment when there is none.
-          say() {
-            if [ -n "$STATUS_ID" ] && gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" -f body="$1" > /dev/null; then return; fi
-            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$1"
-          }
+          approved_label="reviewer-chan: approved"
+          approved_uri=$(jq -rn --arg s "$approved_label" '$s | @uri')
           body="$RUNNER_TEMP/posted.md"
           cp "$OUT/review.md" "$body"
-          # The workflow names who asked, after every gate: the model's body may carry no mention.
+          clean=false
+          case "$(head -n 1 "$body")" in ("## Round "*" | Approve") clean=true ;; esac
+          # The workflow writes the footer after every gate: the model's body may carry no mention.
+          # Logins are checked, so only real handles reach the text.
+          footer=""
           if printf '%s' "$REQUESTER" | grep -Eq '^[A-Za-z0-9-]+$'; then
             if [ "$REQUESTED_HOW" = opened ]; then
-              printf '\n---\n\nStarted when @%s opened this pull request.\n' "$REQUESTER" >> "$body"
+              footer="Started when @$REQUESTER opened this pull request."
             else
-              printf '\n---\n\nRequested by @%s.\n' "$REQUESTER" >> "$body"
+              footer="Requested by @$REQUESTER."
             fi
           fi
+          if [ "$clean" = true ]; then
+            mentions=""
+            for lead in $(printf '%s' "$LEADS" | tr ',' ' '); do
+              if printf '%s' "$lead" | grep -Eq '^[A-Za-z0-9-]+$'; then mentions="$mentions @$lead"; fi
+            done
+            if [ -n "$mentions" ]; then
+              footer="$footer"$'\n'"No open findings.$mentions, ready for your review and merge."
+            else
+              footer="$footer"$'\n'"No open findings: ready for a person's review and merge."
+            fi
+          fi
+          if [ -n "$footer" ]; then printf '\n---\n\n%s\n' "$footer" >> "$body"; fi
           case "$(head -n 1 "$body")" in
             ("## Round "*" | Approve") verdict=--comment ;;
             ("## Round "*" | Request Changes") verdict=--request-changes ;;
@@ -793,50 +803,24 @@ jobs:
             gh pr ready "$PR" -R "$GITHUB_REPOSITORY" --undo > /dev/null \
               || echo "::warning::Could not move the pull request to draft."
           fi
-          # The review is the answer now, so the status comment goes. If it cannot be removed, it
-          # links to the review instead.
-          if [ -n "$STATUS_ID" ] && ! gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" > /dev/null; then
-            url=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
-              | jq -s -r '[(add // [])[] | select(.user.login == "reviewer-chan[bot]")] | last | .html_url // empty')
-            say "Reviewer-chan posted its review of \`${HEAD_SHA:0:7}\`: ${url:-see the reviews below}." \
-              || echo "::warning::Could not update the status comment."
+          # The approved label marks a PR with no open findings, and comes off when a later round
+          # finds something. It is created on first use.
+          if [ "$clean" = true ]; then
+            gh label create "$approved_label" -R "$GITHUB_REPOSITORY" --color 0E8A16 \
+              --description "Reviewer-chan found no open findings" --force > /dev/null 2>&1 || true
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/labels" -f "labels[]=$approved_label" > /dev/null \
+              || echo "::warning::Could not add the $approved_label label."
+          else
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/$approved_uri" > /dev/null 2>&1 || true
           fi
 
-      # Once the comment has its reaction, every failure gets an answer: the posting token if it
-      # was minted, else the notice token (both are app tokens with the same permissions).
+      # Once a request is acknowledged, every failure gets one comment that says why: the posting
+      # token if it was minted, else the notice token (both are app tokens with the same rights).
       - name: Say why nothing was posted
         if: failure() && steps.notice_token.outputs.token != '' && steps.cap.outputs.over != 'true'
         env:
           GH_TOKEN: ${{ steps.post_token.outputs.token || steps.notice_token.outputs.token }}
-          STATUS_ID: ${{ steps.status.outputs.id }}
         run: |
-          # Edit the status comment, or post a new comment when there is none.
-          say() {
-            if [ -n "$STATUS_ID" ] && gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" -f body="$1" > /dev/null; then return; fi
-            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$1"
-          }
           reason="it stopped on an error"
           if [ -s "$RUNNER_TEMP/refusal" ]; then reason=$(cat "$RUNNER_TEMP/refusal"); fi
-          say "Reviewer-chan posted no review of \`${HEAD_SHA:0:7}\`: $reason. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Comment /reviewer-chan to try again, or ask the tech lead."
-
-      # A newer request cancels this run. The notice token may have expired by then (it lasts an
-      # hour), so a fresh one marks the status comment stopped, unless the review already posted.
-      - name: App token after a cancel
-        id: cancel_token
-        if: cancelled() && steps.status.outputs.id != '' && steps.post.outcome != 'success'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: Iv23ligcErlDxeTcwF4c # the Reviewer-chan app (ID 5145047); a client ID is not a secret
-          private-key: ${{ secrets.REVIEWER_CHAN_PRIVATE_KEY }}
-          permission-issues: write
-          permission-pull-requests: write
-
-      - name: Mark the status comment stopped
-        if: cancelled() && steps.cancel_token.outputs.token != ''
-        env:
-          GH_TOKEN: ${{ steps.cancel_token.outputs.token }}
-          STATUS_ID: ${{ steps.status.outputs.id }}
-        run: |
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_ID" > /dev/null \
-            -f body="Reviewer-chan stopped this review of \`${HEAD_SHA:0:7}\`: a newer request replaced it, or someone cancelled the run. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            || echo "::warning::Could not update the status comment."
+          gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "Reviewer-chan posted no review of \`${HEAD_SHA:0:7}\`: $reason. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Add the reviewer-chan label or comment /reviewer-chan to try again, or ask the tech lead."
