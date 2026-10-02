@@ -3,7 +3,7 @@ name: reviewer-chan review
 # The shared Reviewer-chan job. Each repo calls it from a short file pinned to a tagged commit
 # (see the README); Dependabot proposes each new tag there. A comment whose first line is
 # "/reviewer-chan" (or "/reviewer-chan review") starts it, from the PR author with write access
-# or a tech lead.
+# or a tech lead. A caller may also start it when a PR opens or is marked ready for review.
 #
 # Threat model: the job holds the repo tech lead's Claude token (or an OpenCode key) and the app's
 # private key, and the model reads untrusted text (the diff, the PR body, comments). So the model
@@ -76,9 +76,9 @@ jobs:
   gate:
     if: >-
       github.repository_owner == 'PT-Perkasa-Pilar-Utama' &&
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      github.event.comment.user.type != 'Bot'
+      ((github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+        github.event.comment.user.type != 'Bot') ||
+       (github.event_name == 'pull_request_target' && github.event.pull_request.user.type != 'Bot'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -87,22 +87,30 @@ jobs:
       head_sha: ${{ steps.who.outputs.head_sha }}
       base_sha: ${{ steps.who.outputs.base_sha }}
     steps:
-      - name: Decide whether this comment starts a review
+      # A comment asks for a review; an opened or ready PR asks on its author's behalf. Either
+      # way the same rule decides who may start one.
+      - name: Decide whether to start a review
         id: who
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
           BODY: ${{ github.event.comment.body }}
-          LOGIN: ${{ github.event.comment.user.login }}
-          PR: ${{ github.event.issue.number }}
+          LOGIN: ${{ github.event.comment.user.login || github.event.pull_request.user.login }}
+          PR: ${{ github.event.issue.number || github.event.pull_request.number }}
+          DRAFT: ${{ github.event.pull_request.draft }}
           LEADS: ${{ inputs.tech_leads }}
         run: |
           lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
           stop() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; }
-          first=$(printf '%s\n' "$BODY" | head -n 1 | tr -d '\r' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')
-          case "$(lower "$first")" in
-            ("/reviewer-chan" | "/reviewer-chan review") ;;
-            (*) stop "Not a trigger: the first line is not \"/reviewer-chan\" or \"/reviewer-chan review\"." ;;
-          esac
+          if [ "$EVENT" = pull_request_target ]; then
+            [ "$DRAFT" != "true" ] || stop "PR #$PR is a draft. It gets a review when it is marked ready for review."
+          else
+            first=$(printf '%s\n' "$BODY" | head -n 1 | tr -d '\r' | tr -s '[:space:]' ' ' | sed -E 's/^ //; s/ $//')
+            case "$(lower "$first")" in
+              ("/reviewer-chan" | "/reviewer-chan review") ;;
+              (*) stop "Not a trigger: the first line is not \"/reviewer-chan\" or \"/reviewer-chan review\"." ;;
+            esac
+          fi
           view=$(gh pr view "$PR" -R "$GITHUB_REPOSITORY" --json state,author,headRefOid,baseRefOid)
           [ "$(jq -r .state <<< "$view")" = "OPEN" ] || stop "PR #$PR is not open."
           author=$(jq -r .author.login <<< "$view")
@@ -118,6 +126,7 @@ jobs:
             case "$perm" in (write|admin) role="author with write access" ;; esac
           fi
           [ -n "$role" ] || stop "\`$LOGIN\` may not start a review here: only the PR author with write access, a tech lead, or a repo admin can."
+          if [ "$EVENT" = pull_request_target ]; then role="$role, PR opened"; fi
           {
             echo "go=true"
             echo "pr=$PR"
@@ -188,6 +197,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Acknowledge the comment
+        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ steps.notice_token.outputs.token }}
           COMMENT_ID: ${{ github.event.comment.id }}

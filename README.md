@@ -20,6 +20,9 @@ name: reviewer-chan
 on:
   issue_comment:
     types: [created]
+  # To review every new pull request too, remove the # from the next two lines.
+  # pull_request_target:
+  #   types: [opened, ready_for_review]
 
 permissions:
   contents: read
@@ -29,7 +32,11 @@ permissions:
 
 jobs:
   review:
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.4.0
+    # A cheap filter, so most comments start no job; the shared job checks the exact command.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/reviewer-chan'))
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.5.0
     with:
       daily_cap: 10
       tech_leads: your-login # logins separated by spaces or commas
