@@ -36,7 +36,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request_target' ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/reviewer-chan'))
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.5.0
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.6.0
     with:
       daily_cap: 10
       tech_leads: your-login # logins separated by spaces or commas

@@ -596,6 +596,23 @@ jobs:
             while IFS= read -r name; do
               case "$ci" in (*"$name"*) ;; (*) echo "the CI line must name the required check \"$name\", which did not pass" >> "$G" ;; esac
             done < <(jq -r '.[] | select(.bucket != "pass" and .bucket != "skipping") | .name' "$IN/checks.json")
+            # A Where line points at code: a file in the PR head or the base checkout (a finding may
+            # cite a file the PR deleted, or a caller outside the diff), never an input like checks.txt.
+            python3 - "$SKILL/scripts" "$body" "$HEAD_DIR" "$(jq -r .base_dir "$IN/pr.json")" >> "$G" <<'PY'
+          import os, sys
+          sys.path.insert(0, sys.argv[1])
+          import review_body as rb
+          body, head, base = open(sys.argv[2], encoding="utf-8").read(), sys.argv[3], sys.argv[4]
+          def in_tree(root, path):
+              full = os.path.normpath(os.path.join(root, path))
+              return full.startswith(os.path.normpath(root) + os.sep) and os.path.isfile(full)
+          for sec in rb.split_body(body)[1]:
+              m = rb.SECTION_RE.match(sec[0])
+              fid = m[1] if m else "a finding"
+              for path in sorted(rb.cited_paths("\n".join(sec))):
+                  if os.path.isabs(path) or not (in_tree(head, path) or in_tree(base, path)):
+                      print(f'{fid}: its Where line names "{path}", which is not a file in the pull request or the base branch; point it at code, or put a CI result on the CI line')
+          PY
             # Fixes may change a finding's severity or text, never drop it or change its status.
             python3 - "$SKILL/scripts" "$EVIDENCE/draft-1.md" "$body" >> "$G" <<'PY'
           import sys
