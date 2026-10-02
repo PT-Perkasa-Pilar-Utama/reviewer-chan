@@ -38,7 +38,7 @@ jobs:
       (github.event_name == 'pull_request_target' &&
        (github.event.action != 'labeled' || github.event.label.name == 'reviewer-chan')) ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/reviewer-chan'))
-    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.10.1
+    uses: PT-Perkasa-Pilar-Utama/reviewer-chan/.github/workflows/review.yml@<the tag's commit SHA> # v2.10.2
     with:
       daily_cap: 10
       draft_on_request_changes: true # set false to leave the PR as it is
@@ -96,8 +96,9 @@ The engine (Claude or OpenCode) reads; the workflow writes.
 - Comments reach the engine only from people with write access.
 - The rules come from the base branch. The workflow picks the checklist, not Claude.
 - The skill's scripts refuse files outside the review folders and inside any `.git` folder, by real path.
+- A symlink in the PR that points outside the PR's own files becomes a plain file before the engine starts, so no engine reads through it.
 - A comment request gets an eyes reaction, and a label request loses its label. The review is the answer.
-- A run that posts no review always says so in one comment on the PR: why, and what to do next. The reason is a fixed sentence: an expired Claude token, a usage limit, a setup fault, a PR that changed, a review that failed its checks, a failed download, or the stage that failed. This also covers a gate error for a trusted requester, a permission check that fails, and a 3-hour timeout. A cancelled run stays silent: a newer request replaced it, or a person stopped it.
+- A run that posts no review always says so in one comment on the PR: why, and what to do next. The reason is a fixed sentence: an expired Claude token, a usage limit, a setup fault, a PR that changed, a review that failed its checks, a failed download, or the stage that failed. This also covers a gate error for a trusted requester, a permission check that fails, and a 3-hour timeout. A cancelled run stays silent: a newer request replaced it, or a person stopped it. One fault cannot be reported: without `REVIEWER_CHAN_PRIVATE_KEY` no token can comment, so the run fails with its reason only in the job log. Step 4 of the setup guide checks that the secret exists.
 - Passing faults are retried: GitHub API calls (each capped at 2 minutes), downloads, an overloaded or crashed engine or a 429 (once, after a minute), and the verifier. A session that hits its time limit is resumed, not restarted. A review session that stops without writing its body is asked once to finish it. If the session is gone, a new review starts once. A post that GitHub reports as failed is retried only after a check that it did not land.
 - The evidence artifact also keeps each session's denied tool calls and its last message, so a failed run can be explained.
 - The review requests changes when a finding is open, and approves when none is (`approve_when_clean: false` posts a comment instead). A request for changes moves the PR to draft, unless the caller sets `draft_on_request_changes: false`.

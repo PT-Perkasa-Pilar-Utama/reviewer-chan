@@ -382,6 +382,23 @@ jobs:
           retry git -c "http.extraheader=$auth" fetch --no-tags --depth=1 origin "pull/$PR/head:reviewer-chan-head"
           [ "$(git rev-parse reviewer-chan-head)" = "$HEAD_SHA" ] || refuse "$moved"
           git worktree add --detach "$HEAD_DIR" "$HEAD_SHA"
+          # The PR's symlinks that point outside the head (to /proc, the runner's files, a secret)
+          # become plain files, so no engine reads through them, whatever its rules do with links.
+          python3 - "$HEAD_DIR" <<'PY'
+          import os, sys
+          head = os.path.realpath(sys.argv[1])
+          for root, dirs, files in os.walk(head):
+              dirs[:] = [d for d in dirs if d != ".git"]
+              for name in dirs + files:
+                  path = os.path.join(root, name)
+                  if not os.path.islink(path):
+                      continue
+                  target = os.path.realpath(path)
+                  if target != head and not target.startswith(head + os.sep):
+                      os.unlink(path)
+                      with open(path, "w", encoding="utf-8") as f:
+                          f.write("Reviewer-chan replaced this symlink: it points outside the pull request.\n")
+          PY
 
           # The rules come from the base, found here, so the PR cannot pick or drop them.
           checklist=""
@@ -598,9 +615,13 @@ jobs:
               status=$(jq -r 'select(.type == "result") | .api_error_status // ""' "$log" | tail -n 1)
               text=$(jq -r 'select(.type == "result") | .result // ""' "$log" | tail -n 5)
             else
-              grep -q '"type":"step_finish"' "$log" 2> /dev/null || { echo busy; return 0; }
-              grep -q '"type":"error"' "$log" || return 0
-              text=$(jq -R -r 'fromjson? // empty | select(.type == "error") | tostring' "$log" | tail -n 5)
+              # Its error event carries the HTTP status, as error.data.statusCode.
+              status=$(jq -R -r 'fromjson? // empty | select(.type == "error") | .error.data.statusCode // empty' "$log" 2> /dev/null | tail -n 1)
+              text=$(jq -R -r 'fromjson? // empty | select(.type == "error") | .error.data.message // .error.name // ""' "$log" 2> /dev/null | tail -n 5)
+              if [ -z "$status" ] && [ -z "$text" ]; then
+                grep -q '"type":"step_finish"' "$log" 2> /dev/null || { echo busy; return 0; }
+                return 0
+              fi
             fi
             # Status codes first; the text only in the CLI's own wording, so a PR about auth code
             # never reads as a refused token.
@@ -643,7 +664,8 @@ jobs:
                 SID=$(jq -R -r 'fromjson? // empty | .sessionID // empty' "$RUNNER_TEMP/$name.jsonl" | head -n 1)
               fi
               summarize "$name"
-              if ! worth_retry "$name" "$try" || [ -s "$OUT/review.md" ]; then return 0; fi
+              # A body on disk is the answer, whatever error the run logged on the way.
+              if [ -s "$OUT/review.md" ] || ! worth_retry "$name" "$try"; then return 0; fi
               echo "::warning::$ENGINE_NAME failed ($name); trying again in 60 seconds"
               sleep 60
               name="$1-again"
@@ -1057,12 +1079,17 @@ jobs:
             fi
           fi
           [ -n "$advice" ] || advice="$again"
+          say="Reviewer-chan posted no review of \`${HEAD_SHA:0:7}\`: $reason. $advice Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # A call that timed out may still have landed, so each retry looks for it first.
+          said() {
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+              | jq -s -e --arg s "$say" '[add[] | select(.body == $s)] | length > 0' > /dev/null
+          }
           for i in 1 2 3; do
-            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" \
-              --body "Reviewer-chan posted no review of \`${HEAD_SHA:0:7}\`: $reason. $advice Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-              && break
-            [ "$i" -eq 3 ] && exit 1
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$say" && break
             sleep $((i * 10))
+            if said; then break; fi
+            [ "$i" -lt 3 ] || exit 1
           done
           echo "told=true" >> "$GITHUB_OUTPUT"
 
@@ -1133,8 +1160,11 @@ jobs:
           SAY: ${{ steps.what.outputs.say }}
         run: |
           gh() { timeout 120 gh "$@"; }  # gh has no request timeout; a hung call must fail, then retry
+          # A call that timed out may still have landed, so each retry looks for it first.
           for i in 1 2 3; do
             gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body "$SAY" && exit 0
             sleep $((i * 10))
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+              | jq -s -e --arg s "$SAY" '[add[] | select(.body == $s)] | length > 0' > /dev/null && exit 0
           done
           exit 1
